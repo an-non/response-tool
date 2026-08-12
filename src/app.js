@@ -21,6 +21,11 @@ function validate(d){
   return {...d,state_transition:{action:st.action||'preserve',reason:typeof st.reason==='string'?st.reason:null},rendering:{language:r.language||'ja',max_output_tokens:r.max_output_tokens||500,output_format:r.output_format||'text'}};
 }
 function decode(p){return validate(JSON.parse(Buffer.from(String(p),'base64url').toString('utf8')));}
+function decodeBody(body){
+  if(body&&typeof body==='object'&&!Buffer.isBuffer(body))return validate(body);
+  const raw=Buffer.isBuffer(body)?body.toString('utf8'):String(body||'');
+  return validate(JSON.parse(raw));
+}
 
 export async function health(req,res){
   return json(res,200,{ok:true,service:'yuki-relay',version:VERSION,provider:'groq',model:MODEL,groq_configured:!!process.env.GROQ_API_KEY,paid_fallback:false,state_policy:'explicit_replace_only_after_initialization',vault:{primary:'vercel_private_blob_with_runtime_cache_fallback',store_id_env:STORE_ENV,store_id_present:!!(process.env[STORE_ENV]||process.env.BLOB_STORE_ID),blob_prefix:BLOB_PREFIX,state_prefix:STATE_PREFIX,request_saved_before_execution_decision:true,response_storage:true},time:new Date().toISOString()});
@@ -31,9 +36,9 @@ export async function architectureRoute(req,res){
 }
 
 export async function relay(req,res){
-  if(req.method!=='GET')return json(res,405,{ok:false,error:'method_not_allowed'});
+  if(!['GET','POST'].includes(req.method))return json(res,405,{ok:false,error:'method_not_allowed'});
   const id=trace();let p;
-  try{p=decode(req.query?.p);}catch(e){return json(res,400,{ok:false,trace_id:id,error:e.message});}
+  try{p=req.method==='POST'?decodeBody(req.body):decode(req.query?.p);}catch(e){return json(res,400,{ok:false,trace_id:id,error:e.message});}
   const profile=String(p.yuki_context?.profile_id||'yuki-default');
   const sr=await resolveState(profile,p.yuki_state,p.yuki_context,p.state_transition,p.request_id);
   const rp={...p,yuki_state:sr.state};
