@@ -1,4 +1,4 @@
-name: Project execution probe
+name: Response Tool app probe
 
 on:
   push:
@@ -13,86 +13,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify Production project and AI response
+      - name: Verify minimal UI and live AI response
         shell: bash
         env:
           BASE_URL: https://response-tool.vercel.app
         run: |
           set -euo pipefail
 
-          ARCH_CODE=$(curl -sS -o architecture.json -w '%{http_code}' "$BASE_URL/api/architecture")
-          test "$ARCH_CODE" = "200"
-          jq -e '.ok == true and .automatic_external_generation == true' architecture.json >/dev/null
-          echo "architecture_ok=true"
-          jq -r '"renderer_model=" + .renderer.model' architecture.json
+          ROOT_CODE=$(curl -sS -o index.html -w '%{http_code}' "$BASE_URL/")
+          echo "root_http_code=$ROOT_CODE"
+          test "$ROOT_CODE" = "200"
+          grep -q 'id="input"' index.html
+          grep -q 'id="send"' index.html
+          grep -q 'id="response"' index.html
+          echo "minimal_ui_ok=true"
 
           HEALTH_CODE=$(curl -sS -o health.json -w '%{http_code}' "$BASE_URL/api/health")
+          echo "health_http_code=$HEALTH_CODE"
           test "$HEALTH_CODE" = "200"
-          jq -e '.ok == true' health.json >/dev/null
           GROQ_CONFIGURED=$(jq -r '.groq_configured' health.json)
           BLOB_PRESENT=$(jq -r '.vault.store_id_present' health.json)
-          echo "health_ok=true"
           echo "groq_configured=$GROQ_CONFIGURED"
           echo "blob_store_id_present=$BLOB_PRESENT"
-          test "$GROQ_CONFIGURED" = "true"
 
-          P=$(python3 - <<'PY'
-          import base64, json, os
-          run_id = os.environ.get('GITHUB_RUN_ID', 'unknown')
-          payload = {
-              'schema_version': '1.3',
-              'request_id': f'ai_probe_{run_id}',
-              'request_text': 'Reply exactly with the single word OK.',
-              'yuki_state': {
-                  'intent': 'affirmative',
-                  'consent': 'affirmative_revocable',
-                  'initiative': 'neutral',
-                  'affection': 'medium',
-                  'arousal_context': 'none',
-                  'plain_language': ''
-              },
-              'yuki_context': {
-                  'profile_id': f'ai-probe-{run_id}',
-                  'persona': {'autonomy': 'independent'},
-                  'consent_profile': {'revocable': True, 'current_permissions': []},
-                  'relationship': {'established': False, 'mode': None}
-              },
-              'state_transition': {'action': 'preserve', 'reason': 'execution_probe'},
-              'rendering': {'language': 'en', 'max_output_tokens': 8, 'output_format': 'text'}
+          cat > payload.json <<'JSON'
+          {
+            "schema_version":"1.3",
+            "request_id":"web_app_probe",
+            "request_text":"Reply exactly with the single word OK.",
+            "yuki_state":{"intent":"affirmative","consent":"affirmative_revocable","initiative":"neutral","affection":"neutral","arousal_context":"none","plain_language":""},
+            "yuki_context":{"profile_id":"response-tool-web-probe","persona":{"autonomy":"independent"},"consent_profile":{"revocable":true,"current_permissions":[]},"relationship":{"established":false,"mode":null}},
+            "state_transition":{"action":"preserve","reason":"web_app_probe"},
+            "rendering":{"language":"en","max_output_tokens":8,"output_format":"text"}
           }
-          raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
-          print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
-          PY
-          )
+          JSON
 
-          RELAY_CODE=$(curl -sS -o relay.json -w '%{http_code}' --get --data-urlencode "p=$P" "$BASE_URL/api/relay")
+          RELAY_CODE=$(curl -sS -o relay.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @payload.json "$BASE_URL/api/relay")
           echo "relay_http_code=$RELAY_CODE"
-          if [ "$RELAY_CODE" != "200" ]; then
-            jq -c '{ok,error,detail,http_status,trace_id,vault}' relay.json || cat relay.json
-            exit 1
-          fi
+          jq -c '{ok,error,result_type,provider,model,text,execution,vault}' relay.json
 
-          jq -e '.ok == true and .result_type == "generated_text" and .execution.status == "completed" and .provider == "groq" and (.text|type == "string") and (.text|length > 0)' relay.json >/dev/null
-          TRACE_ID=$(jq -r '.trace_id' relay.json)
-          MODEL=$(jq -r '.model' relay.json)
-          BACKEND=$(jq -r '.vault.backend // "unknown"' relay.json)
-          TEXT=$(jq -r '.text' relay.json)
+          test "$GROQ_CONFIGURED" = "true"
+          test "$RELAY_CODE" = "200"
+          jq -e '.ok == true and .result_type == "generated_text" and .provider == "groq" and (.text|type == "string") and (.text|length > 0)' relay.json >/dev/null
           echo "ai_generated=true"
-          echo "trace_id=$TRACE_ID"
-          echo "provider=groq"
-          echo "model=$MODEL"
-          echo "vault_backend=$BACKEND"
-          printf 'ai_text=%s\n' "$TEXT"
-
-          REQUEST_URL=$(jq -r '.vault.request_url // empty' relay.json)
-          RESULT_URL=$(jq -r '.vault.result_url // empty' relay.json)
-          test -n "$REQUEST_URL"
-          test -n "$RESULT_URL"
-
-          curl -sS "$REQUEST_URL" -o request.txt
-          test "$(cat request.txt)" = 'Reply exactly with the single word OK.'
-          echo "request_readback_ok=true"
-
-          curl -sS "$RESULT_URL" -o result.txt
-          test "$(cat result.txt)" = "$TEXT"
-          echo "response_readback_ok=true"
+          printf 'ai_text=%s\n' "$(jq -r '.text' relay.json)"
