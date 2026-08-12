@@ -1,0 +1,92 @@
+name: Blob connectivity probe
+
+on:
+  push:
+    branches:
+      - blob-connectivity-probe-20260812
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Production Blob write and read-back
+        shell: bash
+        env:
+          BASE_URL: https://response-tool-i1cn2ogqr-an-nons-projects.vercel.app
+        run: |
+          set -euo pipefail
+
+          curl -sS "$BASE_URL/api/health" -o health.json
+          jq -e '.ok == true' health.json >/dev/null
+          jq -e '.vault.store_id_present == true' health.json >/dev/null
+          echo "health_ok=true"
+          echo "blob_store_id_present=true"
+
+          P=$(python3 - <<'PY'
+          import base64, json, os
+          run_id = os.environ.get('GITHUB_RUN_ID', 'unknown')
+          payload = {
+              'schema_version': '1.3',
+              'request_id': f'blob_probe_{run_id}',
+              'request_text': 'Blob storage connectivity probe. Return OK.',
+              'yuki_state': {
+                  'intent': 'affirmative',
+                  'consent': 'affirmative_revocable',
+                  'initiative': 'neutral',
+                  'affection': 'medium',
+                  'arousal_context': 'none'
+              },
+              'yuki_context': {
+                  'profile_id': f'blob-probe-{run_id}',
+                  'persona': {'autonomy': 'independent'},
+                  'consent_profile': {'revocable': True, 'current_permissions': []},
+                  'relationship': {'established': False, 'mode': None}
+              },
+              'state_transition': {'action': 'preserve', 'reason': 'connectivity_probe'},
+              'rendering': {'language': 'ja', 'max_output_tokens': 1, 'output_format': 'text'}
+          }
+          raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
+          print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+          PY
+          )
+
+          HTTP_CODE=$(curl -sS -o relay.json -w '%{http_code}' --get --data-urlencode "p=$P" "$BASE_URL/api/relay")
+          TRACE_ID=$(jq -r '.trace_id // empty' relay.json)
+          BACKEND=$(jq -r '.vault.backend // empty' relay.json)
+          BLOB_ERROR=$(jq -r '.vault.blob_attempt_error // empty' relay.json)
+
+          test -n "$TRACE_ID"
+          echo "relay_http_code=$HTTP_CODE"
+          echo "trace_id=$TRACE_ID"
+          echo "vault_backend=$BACKEND"
+
+          if [ "$BACKEND" != "vercel_private_blob" ]; then
+            echo "blob_attempt_error=$BLOB_ERROR"
+            exit 1
+          fi
+
+          REQUEST_URL=$(jq -r '.vault.request_url // empty' relay.json)
+          META_URL=$(jq -r '.vault.metadata_url // empty' relay.json)
+          LIST_URL=$(jq -r '.vault.list_url // empty' relay.json)
+          test -n "$REQUEST_URL"
+          test -n "$META_URL"
+          test -n "$LIST_URL"
+
+          curl -sS "$REQUEST_URL" -o request.txt
+          test "$(cat request.txt)" = 'Blob storage connectivity probe. Return OK.'
+          echo "request_readback_ok=true"
+
+          curl -sS "$META_URL" -o metadata.json
+          jq -e '.ok == true and .metadata.trace_id == $trace' --arg trace "$TRACE_ID" metadata.json >/dev/null
+          echo "metadata_readback_ok=true"
+
+          curl -sS "$LIST_URL" -o list.json
+          jq -e '.ok == true and .backend == "vercel_private_blob"' list.json >/dev/null
+          COUNT=$(jq --arg trace "$TRACE_ID" '[.blobs[] | select(.pathname | contains($trace))] | length' list.json)
+          test "$COUNT" -ge 2
+          echo "blob_list_contains_trace=true"
+          echo "blob_objects_for_trace=$COUNT"
