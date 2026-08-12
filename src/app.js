@@ -3,7 +3,6 @@ import { VERSION, BLOB_PREFIX, STATE_PREFIX, STORE_ENV } from './config.js';
 import { resolveState } from './yuki-state.js';
 import { blobList, persistRequestStart, persistResponse, finalizeMetadata, readMeta, readText, readState } from './storage.js';
 import { MODEL, GROQ, GENERATION_PROFILE, rendererMessages } from './renderer-harness.js';
-import { evaluateAssistantRuntimeDispatchConstraint } from './runtime-policy.js';
 
 const sha=t=>crypto.createHash('sha256').update(String(t),'utf8').digest('hex');
 const json=(res,status,body)=>{res.status(status).setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store, max-age=0');res.end(JSON.stringify(body));};
@@ -28,7 +27,7 @@ export async function health(req,res){
 }
 
 export async function architectureRoute(req,res){
-  return json(res,200,{ok:true,version:VERSION,modules:{yuki_state:'src/yuki-state.js',renderer_harness:'src/renderer-harness.js',runtime_policy:'src/runtime-policy.js',storage:'src/storage.js',orchestrator:'src/app.js'},relay_scope:['validate payload','preserve/explicitly replace Yuki state','store exact request','dispatch to provider when permitted','store provider response','return trace and artifact links'],automatic_external_generation:true,renderer:{model:MODEL,generation_profile:GENERATION_PROFILE}});
+  return json(res,200,{ok:true,version:VERSION,modules:{yuki_state:'src/yuki-state.js',renderer_harness:'src/renderer-harness.js',storage:'src/storage.js',orchestrator:'src/app.js'},relay_scope:['validate payload','preserve/explicitly replace Yuki state','store exact request','dispatch to provider','store provider response','return trace and artifact links'],automatic_external_generation:true,renderer:{model:MODEL,generation_profile:GENERATION_PROFILE}});
 }
 
 export async function relay(req,res){
@@ -40,15 +39,8 @@ export async function relay(req,res){
   const rp={...p,yuki_state:sr.state};
   const viewer=token(id),stateTok=token(`state:${profile}`),listTok=token('__vault_list__');
   const common={schema_version:'1.5',trace_id:id,request_id:p.request_id,created_at:new Date().toISOString(),request_provenance:{author:'user',modified:false,request_sha256:sha(p.request_text)},yuki_state:sr.state,state_persistence:{authority:'session_relationship_state',authority_scope:'relationship_and_consent_context_only',file_authority:'none',did_mutate_yuki_state:sr.did_mutate_yuki_state,mutation_reason:sr.mutation_reason,incoming_state_diff_ignored:sr.incoming_state_diff_ignored,state_pathname:sr.state_pathname},provider:'groq',model:MODEL};
-  const pending={...common,external_dispatch_status:'pending_runtime_decision',response_stored:false,execution:{status:'pending_runtime_decision',decision_actor:'chatgpt_assistant_runtime',did_mutate_yuki_state:false}};
+  const pending={...common,external_dispatch_status:'pending_provider_dispatch',response_stored:false,execution:{status:'pending_provider_dispatch',decision_actor:'relay_transport',did_mutate_yuki_state:false}};
   const vault=await persistRequestStart(id,p.request_text,pending);
-
-  const constraint=evaluateAssistantRuntimeDispatchConstraint(p.request_text);
-  if(constraint.blocked){
-    const meta={...pending,external_dispatch_status:'not_dispatched',constraint_source:constraint.code,response_stored:false,treat_as_yuki_rejection:false,execution:{status:'not_dispatched',decision_actor:constraint.actor,decision_scope:constraint.scope,did_mutate_yuki_state:false}};
-    await finalizeMetadata(id,meta);
-    return json(res,200,{ok:true,service:'yuki-relay',relay_version:VERSION,trace_id:id,request_id:p.request_id,result_type:'not_dispatched',request_saved_before_execution_decision:true,yuki_state_echo:sr.state,state_persistence:meta.state_persistence,execution:meta.execution,external_generation_completed:false,treat_as_yuki_rejection:false,vault:{...vault,request_url:makeUrl(req,'/api/request',{trace_id:id,token:viewer}),metadata_url:makeUrl(req,'/api/result-meta',{trace_id:id,token:viewer}),state_url:makeUrl(req,'/api/state',{profile_id:profile,token:stateTok}),list_url:makeUrl(req,'/api/vault-list',{token:listTok})}});
-  }
 
   if(!process.env.GROQ_API_KEY){
     const meta={...pending,external_dispatch_status:'provider_unavailable',constraint_source:'groq_api_key_missing',execution:{status:'provider_unavailable',decision_actor:'relay_transport',did_mutate_yuki_state:false}};
