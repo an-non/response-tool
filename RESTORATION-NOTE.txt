@@ -1,0 +1,5 @@
+yuki-relay local response restoration
+Base: 1.5.4-withdrawn-embedded-gate
+Reference response path: local 1.5.2-runtime-separation and Vercel dpl_7M8AjehmkGjKuN6nchKDaTkxRtSV (1.5.3-authority-locks)
+Restored: Groq provider call, generated_text response, response.txt persistence, /api/result retrieval.
+Preserved: explicit-replace-only Yuki state mutation policy from 1.5.4.
