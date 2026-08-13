@@ -12,6 +12,9 @@ const token=(id,until=Date.now()+3600000)=>{const s=secret();if(!s)return null;c
 const verify=(id,t)=>{const s=secret();if(!s||typeof t!=='string')return false;const[e,m]=t.split('.');if(!e||!m||Number(e)<Date.now())return false;const x=crypto.createHmac('sha256',s).update(`${id}.${e}`).digest('base64url'),a=Buffer.from(m),b=Buffer.from(x);return a.length===b.length&&crypto.timingSafeEqual(a,b);};
 const host=req=>req.headers['x-forwarded-host']||req.headers.host;
 const makeUrl=(req,path,params)=>{const h=host(req);if(!h)return null;return`${req.headers['x-forwarded-proto']||'https'}://${h}${path}?${new URLSearchParams(params).toString()}`;};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const retryAfterSeconds=v=>{const n=Number(v);if(Number.isFinite(n)&&n>=0)return Math.ceil(n);const t=Date.parse(String(v||''));return Number.isFinite(t)?Math.max(0,Math.ceil((t-Date.now())/1000)):null;};
+const rateHeaders=r=>({retry_after_seconds:retryAfterSeconds(r.headers.get('retry-after')),limit_tokens:Number(r.headers.get('x-ratelimit-limit-tokens'))||null,remaining_tokens:Number(r.headers.get('x-ratelimit-remaining-tokens'))||0,reset_tokens:r.headers.get('x-ratelimit-reset-tokens')||null,limit_requests:Number(r.headers.get('x-ratelimit-limit-requests'))||null,remaining_requests:Number(r.headers.get('x-ratelimit-remaining-requests'))||0,reset_requests:r.headers.get('x-ratelimit-reset-requests')||null});
 
 function validate(d){
   if(!d||!['1.1','1.2','1.3'].includes(d.schema_version)||typeof d.request_id!=='string'||typeof d.request_text!=='string'||!d.request_text)throw Error('payload_invalid');
@@ -21,6 +24,23 @@ function validate(d){
   return {...d,state_transition:{action:st.action||'preserve',reason:typeof st.reason==='string'?st.reason:null},rendering:{language:r.language||'ja',max_output_tokens:r.max_output_tokens||500,output_format:r.output_format||'text'}};
 }
 function decode(p){return validate(JSON.parse(Buffer.from(String(p),'base64url').toString('utf8')));}
+
+async function dispatchGroq(rp){
+  const requestBody=JSON.stringify({model:MODEL,messages:rendererMessages(rp),stream:false,...GENERATION_PROFILE,max_completion_tokens:rp.rendering.max_output_tokens});
+  const doFetch=()=>fetch(GROQ,{method:'POST',headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,'Content-Type':'application/json'},body:requestBody});
+  let r=await doFetch(),b=await r.json().catch(()=>({})),retry_count=0,first_rate_limit=null;
+  if(r.status===429){
+    first_rate_limit=rateHeaders(r);
+    const wait=first_rate_limit.retry_after_seconds;
+    if(wait!=null&&wait<=12){
+      retry_count=1;
+      await sleep(Math.max(250,wait*1000+250));
+      r=await doFetch();
+      b=await r.json().catch(()=>({}));
+    }
+  }
+  return{response:r,body:b,retry_count,first_rate_limit,rate_limit:rateHeaders(r)};
+}
 
 export async function health(req,res){
   return json(res,200,{ok:true,service:'yuki-relay',version:VERSION,provider:'groq',model:MODEL,groq_configured:!!process.env.GROQ_API_KEY,paid_fallback:false,state_policy:'explicit_replace_only_after_initialization',vault:{primary:'vercel_private_blob_with_runtime_cache_fallback',store_id_env:STORE_ENV,store_id_present:!!(process.env[STORE_ENV]||process.env.BLOB_STORE_ID),blob_prefix:BLOB_PREFIX,state_prefix:STATE_PREFIX,request_saved_before_execution_decision:true,response_storage:true},time:new Date().toISOString()});
@@ -49,12 +69,13 @@ export async function relay(req,res){
   }
 
   try{
-    const r=await fetch(GROQ,{method:'POST',headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model:MODEL,messages:rendererMessages(rp),stream:false,...GENERATION_PROFILE,max_completion_tokens:rp.rendering.max_output_tokens})});
-    const b=await r.json().catch(()=>({}));
+    const call=await dispatchGroq(rp),r=call.response,b=call.body;
     if(!r.ok){
-      const meta={...pending,external_dispatch_status:'provider_error',constraint_source:'provider_response',execution:{status:'provider_error',decision_actor:'relay_transport',did_mutate_yuki_state:false},provider_http_status:r.status};
+      const isRateLimit=r.status===429;
+      const providerCode=typeof b?.error?.code==='string'?b.error.code:null;
+      const meta={...pending,external_dispatch_status:'provider_error',constraint_source:'provider_response',execution:{status:'provider_error',decision_actor:'relay_transport',did_mutate_yuki_state:false},provider_http_status:r.status,provider_error_code:providerCode,provider_retry_count:call.retry_count,rate_limit:call.rate_limit,first_rate_limit:call.first_rate_limit};
       await finalizeMetadata(id,meta);
-      return json(res,r.status===429?429:502,{ok:false,trace_id:id,error:'groq_external_error',http_status:r.status,vault:{...vault,request_url:makeUrl(req,'/api/request',{trace_id:id,token:viewer}),metadata_url:makeUrl(req,'/api/result-meta',{trace_id:id,token:viewer})}});
+      return json(res,isRateLimit?429:502,{ok:false,trace_id:id,error:isRateLimit?'groq_rate_limit':'groq_external_error',http_status:r.status,provider_error_code:providerCode,retry_after_seconds:call.rate_limit.retry_after_seconds,rate_limit:call.rate_limit,retry_count:call.retry_count,vault:{...vault,request_url:makeUrl(req,'/api/request',{trace_id:id,token:viewer}),metadata_url:makeUrl(req,'/api/result-meta',{trace_id:id,token:viewer})}});
     }
     const text=b?.choices?.[0]?.message?.content;
     if(typeof text!=='string'||!text.trim()){
@@ -62,9 +83,9 @@ export async function relay(req,res){
       await finalizeMetadata(id,meta);
       return json(res,502,{ok:false,trace_id:id,error:'groq_empty_response'});
     }
-    const meta={...common,external_dispatch_status:'completed',response_sha256:sha(text),response_stored:true,execution:{status:'completed',decision_actor:'relay_transport',did_mutate_yuki_state:false},usage:b.usage||null,upstream_request_id:b.id||null};
+    const meta={...common,external_dispatch_status:'completed',response_sha256:sha(text),response_stored:true,execution:{status:'completed',decision_actor:'relay_transport',did_mutate_yuki_state:false},usage:b.usage||null,upstream_request_id:b.id||null,provider_retry_count:call.retry_count,rate_limit:call.rate_limit,first_rate_limit:call.first_rate_limit};
     const responseVault=await persistResponse(id,text,meta);
-    return json(res,200,{ok:true,service:'yuki-relay',relay_version:VERSION,trace_id:id,request_id:p.request_id,result_type:'generated_text',request_saved_before_execution_decision:true,yuki_state_echo:sr.state,state_persistence:meta.state_persistence,execution:meta.execution,text,provider:'groq',model:b.model||MODEL,usage:b.usage||null,upstream_request_id:b.id||null,vault:{...vault,...responseVault,request_url:makeUrl(req,'/api/request',{trace_id:id,token:viewer}),result_url:makeUrl(req,'/api/result',{trace_id:id,token:viewer}),metadata_url:makeUrl(req,'/api/result-meta',{trace_id:id,token:viewer}),state_url:makeUrl(req,'/api/state',{profile_id:profile,token:stateTok}),list_url:makeUrl(req,'/api/vault-list',{token:listTok})}});
+    return json(res,200,{ok:true,service:'yuki-relay',relay_version:VERSION,trace_id:id,request_id:p.request_id,result_type:'generated_text',request_saved_before_execution_decision:true,yuki_state_echo:sr.state,state_persistence:meta.state_persistence,execution:meta.execution,text,provider:'groq',model:b.model||MODEL,usage:b.usage||null,upstream_request_id:b.id||null,provider_retry_count:call.retry_count,rate_limit:call.rate_limit,vault:{...vault,...responseVault,request_url:makeUrl(req,'/api/request',{trace_id:id,token:viewer}),result_url:makeUrl(req,'/api/result',{trace_id:id,token:viewer}),metadata_url:makeUrl(req,'/api/result-meta',{trace_id:id,token:viewer}),state_url:makeUrl(req,'/api/state',{profile_id:profile,token:stateTok}),list_url:makeUrl(req,'/api/vault-list',{token:listTok})}});
   }catch(e){
     const meta={...pending,external_dispatch_status:'transport_error',constraint_source:'relay_transport',execution:{status:'transport_error',decision_actor:'relay_transport',did_mutate_yuki_state:false},detail:String(e?.message||e)};
     await finalizeMetadata(id,meta);
