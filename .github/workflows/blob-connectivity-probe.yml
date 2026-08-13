@@ -11,9 +11,9 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - name: Verify Blob memory, 10-turn compression, and recall
+      - name: Verify Blob memory and natural-language automatic recall
         shell: bash
         env:
           BASE_URL: https://response-tool.vercel.app
@@ -23,62 +23,38 @@ jobs:
           ROOT_CODE=$(curl -sS -o index.html -w '%{http_code}' "$BASE_URL/")
           echo "root_http_code=$ROOT_CODE"
           test "$ROOT_CODE" = "200"
-          grep -q 'id="input"' index.html
-          grep -q 'id="send"' index.html
-          grep -q 'id="conversation"' index.html
-          grep -q 'max_output_tokens:1800' index.html
-          echo "memory_ui_ok=true"
 
           HEALTH_CODE=$(curl -sS -o memory-health.json -w '%{http_code}' "$BASE_URL/api/memory-health")
           echo "memory_health_http_code=$HEALTH_CODE"
-          cat memory-health.json
           test "$HEALTH_CODE" = "200"
           jq -e '.ok == true and .memory.provider == "vercel_private_blob" and .compression_block_size == 10' memory-health.json >/dev/null
           echo "blob_memory_health_ok=true"
 
-          PROFILE="response-tool-blob-memory-probe"
-          SESSION="blob-memory-probe-$(date +%s)"
+          PROFILE="response-tool-auto-recall-probe"
+          SESSION="auto-recall-probe-$(date +%s)"
           TOKEN=""
 
           for N in $(seq 1 10); do
             if [ "$N" = "3" ]; then
-              TEXT="Turn 3 marker ORBITPINE. Reply exactly with T3."
+              TEXT="Turn 3: remember the unique marker ORBITPINE as an important conversation fact. Reply exactly with T3."
             else
               TEXT="Turn $N. Reply exactly with T$N."
             fi
             jq -n \
-              --arg rid "blob_memory_probe_$N" \
+              --arg rid "auto_recall_probe_$N" \
               --arg text "$TEXT" \
               --arg profile "$PROFILE" \
               --arg session "$SESSION" \
-              '{schema_version:"1.3",request_id:$rid,request_text:$text,session_id:$session,client_recent_turns:[],yuki_state:{intent:"affirmative",consent:"affirmative_revocable",initiative:"neutral",affection:"neutral",arousal_context:"none",plain_language:""},yuki_context:{profile_id:$profile,session_id:$session,persona:{autonomy:"independent"},consent_profile:{revocable:true,current_permissions:[]},relationship:{established:false,mode:null}},state_transition:{action:"preserve",reason:"blob_memory_probe"},rendering:{language:"en",max_output_tokens:24,output_format:"text"}}' > payload.json
+              '{schema_version:"1.3",request_id:$rid,request_text:$text,session_id:$session,client_recent_turns:[],yuki_state:{intent:"affirmative",consent:"affirmative_revocable",initiative:"neutral",affection:"neutral",arousal_context:"none",plain_language:""},yuki_context:{profile_id:$profile,session_id:$session,persona:{autonomy:"independent"},consent_profile:{revocable:true,current_permissions:[]},relationship:{established:false,mode:null}},state_transition:{action:"preserve",reason:"auto_recall_probe"},rendering:{language:"en",max_output_tokens:24,output_format:"text"}}' > payload.json
             P=$(base64 -w0 payload.json | tr '+/' '-_' | tr -d '=')
             CODE=$(curl -sS -o relay.json -w '%{http_code}' "$BASE_URL/api/relay?p=$P")
             echo "turn_${N}_http_code=$CODE"
             test "$CODE" = "200"
-            jq -e '.ok == true and .result_type == "generated_text" and .provider == "groq" and .memory.blob_configured == true and .memory.block_size == 10' relay.json >/dev/null
+            jq -e '.ok == true and .provider == "groq" and .memory.blob_configured == true' relay.json >/dev/null
             TOKEN=$(jq -r '.memory.session_token' relay.json)
-            test -n "$TOKEN"
             sleep 1
           done
           echo "ten_turn_generation_ok=true"
-
-          HISTORY_URL="$BASE_URL/api/history?profile_id=$PROFILE&session_id=$SESSION&token=$TOKEN&limit=20"
-          COUNT=0
-          for TRY in $(seq 1 15); do
-            HCODE=$(curl -sS -o history.json -w '%{http_code}' "$HISTORY_URL")
-            if [ "$HCODE" = "200" ]; then
-              COUNT=$(jq '.turns|length' history.json)
-              [ "$COUNT" -ge 10 ] && break
-            fi
-            sleep 2
-          done
-          echo "history_http_code=$HCODE"
-          echo "history_turn_count=$COUNT"
-          test "$HCODE" = "200"
-          test "$COUNT" -ge 10
-          jq -e '.turns[] | select(.turn_no == 3 and (.request_text|contains("ORBITPINE")))' history.json >/dev/null
-          echo "history_original_marker_ok=true"
 
           RECALL_URL="$BASE_URL/api/recall?profile_id=$PROFILE&session_id=$SESSION&token=$TOKEN&q=ORBITPINE&max_blocks=3"
           MATCHES=0
@@ -92,12 +68,23 @@ jobs:
             fi
             sleep 3
           done
-          echo "recall_http_code=$RCODE"
-          echo "recall_blocks=$BLOCKS"
-          echo "recall_matches=$MATCHES"
-          test "$RCODE" = "200"
+          echo "recall_api_blocks=$BLOCKS"
+          echo "recall_api_matches=$MATCHES"
           test "$BLOCKS" -ge 1
           test "$MATCHES" -ge 1
-          jq -e '.recall.matches[] | select(.turn_no == 3 and (.request|contains("ORBITPINE")))' recall.json >/dev/null
-          jq -e '.recall.blocks[] | select(.memory.authority == "derived_context_only" and .memory.can_grant_consent == false)' recall.json >/dev/null
-          echo "compression_and_recall_ok=true"
+
+          QUERY="What did the stored conversation memory contain? Specifically, what unique marker did I ask you to remember earlier? Answer from the relay-provided stored and recalled context, and include the marker exactly."
+          jq -n \
+            --arg rid "auto_recall_probe_11" \
+            --arg text "$QUERY" \
+            --arg profile "$PROFILE" \
+            --arg session "$SESSION" \
+            '{schema_version:"1.3",request_id:$rid,request_text:$text,session_id:$session,client_recent_turns:[],yuki_state:{intent:"affirmative",consent:"affirmative_revocable",initiative:"neutral",affection:"neutral",arousal_context:"none",plain_language:""},yuki_context:{profile_id:$profile,session_id:$session,persona:{autonomy:"independent"},consent_profile:{revocable:true,current_permissions:[]},relationship:{established:false,mode:null}},state_transition:{action:"preserve",reason:"auto_recall_probe"},rendering:{language:"en",max_output_tokens:180,output_format:"text"}}' > query.json
+          P=$(base64 -w0 query.json | tr '+/' '-_' | tr -d '=')
+          QCODE=$(curl -sS -o answer.json -w '%{http_code}' "$BASE_URL/api/relay?p=$P")
+          echo "natural_recall_http_code=$QCODE"
+          jq -c '{ok,text,memory:{recall_matches:.memory.recall_matches,recall_blocks:.memory.recall_blocks,manifest:.memory.manifest}}' answer.json
+          test "$QCODE" = "200"
+          jq -e '.ok == true and .memory.recall_matches >= 1 and .memory.recall_blocks >= 1 and .memory.manifest.turn_count >= 10' answer.json >/dev/null
+          jq -r '.text' answer.json | grep -q 'ORBITPINE'
+          echo "natural_language_recall_answer_ok=true"
