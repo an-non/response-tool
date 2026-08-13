@@ -1,12 +1,13 @@
 {
   "name": "yuki-relay",
-  "version": "1.5.4-response-restored-local",
+  "version": "1.6.0-memory-blocks",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
     "@vercel/functions": "latest",
     "@vercel/blob": "latest",
     "@vercel/oidc": "latest"
