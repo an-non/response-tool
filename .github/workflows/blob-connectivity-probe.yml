@@ -1,4 +1,4 @@
-name: Response Tool app probe
+name: Response Tool memory probe
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify minimal UI and live AI response
+      - name: Verify UI, live AI, and memory wiring
         shell: bash
         env:
           BASE_URL: https://response-tool.vercel.app
@@ -25,35 +25,36 @@ jobs:
           test "$ROOT_CODE" = "200"
           grep -q 'id="input"' index.html
           grep -q 'id="send"' index.html
-          grep -q 'id="response"' index.html
-          echo "minimal_ui_ok=true"
+          grep -q 'id="conversation"' index.html
+          grep -q 'max_output_tokens:1800' index.html
+          echo "memory_ui_ok=true"
 
           HEALTH_CODE=$(curl -sS -o health.json -w '%{http_code}' "$BASE_URL/api/health")
           echo "health_http_code=$HEALTH_CODE"
           test "$HEALTH_CODE" = "200"
-          GROQ_CONFIGURED=$(jq -r '.groq_configured' health.json)
-          BLOB_PRESENT=$(jq -r '.vault.store_id_present' health.json)
-          echo "groq_configured=$GROQ_CONFIGURED"
-          echo "blob_store_id_present=$BLOB_PRESENT"
+          echo "groq_configured=$(jq -r '.groq_configured' health.json)"
+          echo "blob_store_id_present=$(jq -r '.vault.store_id_present' health.json)"
 
           cat > payload.json <<'JSON'
           {
             "schema_version":"1.3",
-            "request_id":"web_app_probe",
+            "request_id":"memory_probe",
             "request_text":"Reply exactly with the single word OK.",
+            "session_id":"memory-probe-session",
+            "client_recent_turns":[],
             "yuki_state":{"intent":"affirmative","consent":"affirmative_revocable","initiative":"neutral","affection":"neutral","arousal_context":"none","plain_language":""},
-            "yuki_context":{"profile_id":"response-tool-web-probe","persona":{"autonomy":"independent"},"consent_profile":{"revocable":true,"current_permissions":[]},"relationship":{"established":false,"mode":null}},
-            "state_transition":{"action":"preserve","reason":"web_app_probe"},
-            "rendering":{"language":"en","max_output_tokens":8,"output_format":"text"}
+            "yuki_context":{"profile_id":"response-tool-memory-probe","session_id":"memory-probe-session","persona":{"autonomy":"independent"},"consent_profile":{"revocable":true,"current_permissions":[]},"relationship":{"established":false,"mode":null}},
+            "state_transition":{"action":"preserve","reason":"memory_probe"},
+            "rendering":{"language":"en","max_output_tokens":32,"output_format":"text"}
           }
           JSON
-
-          RELAY_CODE=$(curl -sS -o relay.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @payload.json "$BASE_URL/api/relay")
+          P=$(base64 -w0 payload.json | tr '+/' '-_' | tr -d '=')
+          RELAY_CODE=$(curl -sS -o relay.json -w '%{http_code}' "$BASE_URL/api/relay?p=$P")
           echo "relay_http_code=$RELAY_CODE"
-          jq -c '{ok,error,result_type,provider,model,text,execution,vault}' relay.json
-
-          test "$GROQ_CONFIGURED" = "true"
+          jq -c '{ok,error,result_type,provider,model,text,memory}' relay.json
           test "$RELAY_CODE" = "200"
           jq -e '.ok == true and .result_type == "generated_text" and .provider == "groq" and (.text|type == "string") and (.text|length > 0)' relay.json >/dev/null
           echo "ai_generated=true"
           printf 'ai_text=%s\n' "$(jq -r '.text' relay.json)"
+          echo "memory_database_configured=$(jq -r '.memory.database_configured' relay.json)"
+          echo "memory_session_token_present=$(jq -r '(.memory.session_token|type)=="string" and (.memory.session_token|length)>0' relay.json)"
