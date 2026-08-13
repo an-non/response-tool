@@ -1,6 +1,6 @@
 import { waitUntil } from '@vercel/functions';
 import { relay as appRelay } from '../src/app.js';
-import { MEMORY_BLOCK_SIZE, memoryBlobConfigured, recordConversationTurn, getStorageManifest } from '../src/conversation-blob.js';
+import { MEMORY_BLOCK_SIZE, memoryBlobConfigured, recordConversationTurn, getStorageManifest, bindActiveSession } from '../src/conversation-blob.js';
 import { getRuntimeMemoryContext, compressMemoryBlock, recallMemory } from '../src/memory-compression.js';
 import { conversationToken } from '../src/conversation-auth.js';
 
@@ -13,6 +13,8 @@ export default async function handler(req,res){
   try{payload=decode(req.query?.p);}catch{return appRelay(req,res);}
   const profileId=String(payload?.yuki_context?.profile_id||'yuki-default');
   const sessionId=String(payload?.session_id||payload?.yuki_context?.session_id||'default');
+  const clientId=String(payload?.client_id||'');
+  const clientKey=String(payload?.client_key||'');
   payload.session_id=sessionId;
   if(memoryBlobConfigured()){
     try{
@@ -38,6 +40,7 @@ export default async function handler(req,res){
         body.memory={blob_configured:memoryBlobConfigured(),session_id:sessionId,session_token:conversationToken(profileId,sessionId),block_size:MEMORY_BLOCK_SIZE,authority:'derived_context_only',recall_matches:Array.isArray(payload.recall_context?.matches)?payload.recall_context.matches.length:0,recall_blocks:Array.isArray(payload.recall_context?.blocks)?payload.recall_context.blocks.length:0,manifest:payload.storage_manifest||null};
         out=JSON.stringify(body);
         if(memoryBlobConfigured())waitUntil((async()=>{
+          if(clientId&&clientKey)await bindActiveSession(profileId,sessionId,clientId,clientKey);
           const recorded=await recordConversationTurn({profileId,sessionId,traceId:body.trace_id,requestId:payload.request_id,requestText:payload.request_text,responseText:body.text,yukiState:body.yuki_state_echo||payload.yuki_state});
           if(recorded?.compression_due)await compressMemoryBlock({profileId,sessionId,blockNo:recorded.block_no,currentState:body.yuki_state_echo||payload.yuki_state});
         })().catch(()=>{}));
