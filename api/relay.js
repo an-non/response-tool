@@ -1,6 +1,6 @@
 import { waitUntil } from '@vercel/functions';
 import { relay as appRelay } from '../src/app.js';
-import { MEMORY_BLOCK_SIZE, memoryDatabaseConfigured, recordConversationTurn } from '../src/conversation-db.js';
+import { MEMORY_BLOCK_SIZE, memoryBlobConfigured, recordConversationTurn } from '../src/conversation-blob.js';
 import { getRuntimeMemoryContext, compressMemoryBlock } from '../src/memory-compression.js';
 import { conversationToken } from '../src/conversation-auth.js';
 
@@ -14,7 +14,7 @@ export default async function handler(req,res){
   const profileId=String(payload?.yuki_context?.profile_id||'yuki-default');
   const sessionId=String(payload?.session_id||payload?.yuki_context?.session_id||'default');
   payload.session_id=sessionId;
-  if(memoryDatabaseConfigured()){
+  if(memoryBlobConfigured()){
     try{
       const ctx=await getRuntimeMemoryContext(profileId,sessionId);
       payload.memory_context=ctx.memory;
@@ -29,9 +29,9 @@ export default async function handler(req,res){
     try{
       const body=JSON.parse(Buffer.isBuffer(chunk)?chunk.toString('utf8'):String(chunk||''));
       if(body?.ok===true&&body?.result_type==='generated_text'){
-        body.memory={database_configured:memoryDatabaseConfigured(),session_id:sessionId,session_token:conversationToken(profileId,sessionId),block_size:MEMORY_BLOCK_SIZE,authority:'derived_context_only'};
+        body.memory={blob_configured:memoryBlobConfigured(),session_id:sessionId,session_token:conversationToken(profileId,sessionId),block_size:MEMORY_BLOCK_SIZE,authority:'derived_context_only'};
         out=JSON.stringify(body);
-        if(memoryDatabaseConfigured())waitUntil((async()=>{
+        if(memoryBlobConfigured())waitUntil((async()=>{
           const recorded=await recordConversationTurn({profileId,sessionId,traceId:body.trace_id,requestId:payload.request_id,requestText:payload.request_text,responseText:body.text,yukiState:body.yuki_state_echo||payload.yuki_state});
           if(recorded?.compression_due)await compressMemoryBlock({profileId,sessionId,blockNo:recorded.block_no,currentState:body.yuki_state_echo||payload.yuki_state});
         })().catch(()=>{}));
