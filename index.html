@@ -36,7 +36,7 @@ function encodePayload(value){const bytes=new TextEncoder().encode(JSON.stringif
 function recentPairs(){const pairs=[];for(let i=Math.max(0,history.length-4);i<history.length;i+=2){const u=history[i],a=history[i+1];if(u?.role==='user'&&a?.role==='assistant')pairs.push({request:u.text,response:a.text});}return pairs.slice(-2);}
 async function resumeFromBlob(){
   try{
-    const u='/api/session-resume?'+new URLSearchParams({profile_id:profileId,client_id:clientId,client_key:clientKey,limit:'30'});
+    const u='/api/history?'+new URLSearchParams({profile_id:profileId,client_id:clientId,client_key:clientKey,limit:'30'});
     const r=await fetch(u),b=await r.json();
     if(r.status===404){sessionStorage.setItem('yuki_session_id',sessionId);return;}
     if(!r.ok||!b.ok)throw new Error(b.error||('HTTP '+r.status));
