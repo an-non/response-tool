@@ -21,7 +21,8 @@ export default async function handler(req,res){
       payload.recent_turns=ctx.recent_turns;
     }catch(e){payload.memory_load_error=String(e?.message||e);}
   }
-  const wrappedReq={...req,query:{...(req.query||{}),p:encode(payload)}};
+  const wrappedReq=Object.create(req);
+  wrappedReq.query={...(req.query||{}),p:encode(payload)};
   const originalEnd=res.end.bind(res);
   res.end=(chunk,...args)=>{
     let out=chunk;
