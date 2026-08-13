@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { MEMORY_PREFIX, BLOB_PREFIX } from './config.js';
 import { blobList, readText, readMeta } from './storage.js';
 
@@ -8,11 +9,14 @@ export const RECENT_TEXT_CHARS=900;
 const safe=id=>encodeURIComponent(String(id||'default')).replace(/%/g,'_');
 const pad=n=>String(Number(n)||0).padStart(6,'0');
 const base=(profileId,sessionId)=>`${MEMORY_PREFIX}${safe(profileId)}/${safe(sessionId)}/`;
+const clientPath=(profileId,clientId)=>`${MEMORY_PREFIX}${safe(profileId)}/clients/${safe(clientId)}/active.json`;
 const turnPath=(profileId,sessionId,turnNo)=>`${base(profileId,sessionId)}turns/${pad(turnNo)}.json`;
 const blockPath=(profileId,sessionId,blockNo)=>`${base(profileId,sessionId)}blocks/${pad((blockNo-1)*MEMORY_BLOCK_SIZE+1)}-${pad(blockNo*MEMORY_BLOCK_SIZE)}.json`;
 const currentPath=(profileId,sessionId)=>`${base(profileId,sessionId)}current.json`;
 const sessionPath=(profileId,sessionId)=>`${base(profileId,sessionId)}session.json`;
 const trimText=(v,n=RECENT_TEXT_CHARS)=>{const s=String(v||'');return s.length>n?s.slice(0,n)+'…':s;};
+const clientKeyHash=key=>crypto.createHash('sha256').update(String(key||''),'utf8').digest('base64url');
+const secureEqual=(a,b)=>{const x=Buffer.from(String(a||'')),y=Buffer.from(String(b||''));return x.length===y.length&&crypto.timingSafeEqual(x,y);};
 
 async function auth(){
   if(process.env.BLOB_READ_WRITE_TOKEN)return{token:process.env.BLOB_READ_WRITE_TOKEN};
@@ -29,6 +33,20 @@ async function getJson(path){try{const{get}=await import('@vercel/blob');const r
 export function memoryBlobConfigured(){return !!(process.env.BLOB_READ_WRITE_TOKEN||process.env.blobyuki_STORE_ID||process.env.BLOB_STORE_ID);}
 async function listTurns(profileId,sessionId){const prefix=`${base(profileId,sessionId)}turns/`;const x=await blobList(prefix,1000);return (x.blobs||[]).map(b=>({pathname:b.pathname,turn_no:Number((b.pathname.match(/\/(\d{6})\.json$/)||[])[1]||0)})).filter(x=>x.turn_no>0).sort((a,b)=>a.turn_no-b.turn_no);}
 async function listBlocks(profileId,sessionId){const prefix=`${base(profileId,sessionId)}blocks/`;const x=await blobList(prefix,1000);return (x.blobs||[]).map(b=>({pathname:b.pathname,block_no:Math.ceil(Number((b.pathname.match(/\/(\d{6})-/)||[])[1]||0)/MEMORY_BLOCK_SIZE)})).filter(x=>x.block_no>0).sort((a,b)=>a.block_no-b.block_no);}
+
+export async function bindActiveSession(profileId,sessionId,clientId,clientKey){
+  if(!memoryBlobConfigured()||!clientId||!clientKey||!sessionId)return false;
+  await putJson(clientPath(profileId,clientId),{schema_version:'1.0',profile_id:profileId,client_id:clientId,session_id:sessionId,client_key_hash:clientKeyHash(clientKey),updated_at:new Date().toISOString()});
+  return true;
+}
+export async function resolveActiveSession(profileId,clientId,clientKey){
+  if(!memoryBlobConfigured()||!clientId||!clientKey)return null;
+  const row=await getJson(clientPath(profileId,clientId));
+  if(!row)return null;
+  if(!secureEqual(row.client_key_hash,clientKeyHash(clientKey)))return{unauthorized:true};
+  return{profile_id:profileId,client_id:clientId,session_id:String(row.session_id||''),updated_at:row.updated_at||null};
+}
+export async function verifyClientSession(profileId,sessionId,clientId,clientKey){const row=await resolveActiveSession(profileId,clientId,clientKey);return !!row&&!row.unauthorized&&row.session_id===String(sessionId||'');}
 
 export async function recordConversationTurn({profileId,sessionId,traceId,requestId,requestText,responseText,yukiState}){
   if(!memoryBlobConfigured())return{stored:false,reason:'blob_memory_unavailable'};
@@ -53,7 +71,7 @@ export async function getStorageManifest(profileId,sessionId){
   const [turns,blocks,current,session]=await Promise.all([listTurns(profileId,sessionId),listBlocks(profileId,sessionId),getLatestMemoryState(profileId,sessionId),getJson(sessionPath(profileId,sessionId))]);
   const latestTurnNo=turns.at(-1)?.turn_no||0;
   const actualTurnCount=Math.max(Number(session?.turn_count||0),turns.length,latestTurnNo);
-  return{schema_version:'1.0',provider:'vercel_private_blob',profile_id:profileId,session_id:sessionId,prefix:base(profileId,sessionId),turn_count:actualTurnCount,turn_index_count:turns.length,block_count:blocks.length,latest_turn_no:latestTurnNo,latest_block_no:blocks.at(-1)?.block_no||0,current_memory_source_block_no:Number(current?.source_block_no||0),current_memory_available:!!current?.memory,stored_artifacts:{turn_index:'memory/.../turns/<turn>.json',compressed_blocks:'memory/.../blocks/<10-turn-range>.json',current_memory:'memory/.../current.json',original_request_response:'results/<trace_id>/request.txt + response.txt'}};
+  return{schema_version:'1.0',provider:'vercel_private_blob',profile_id:profileId,session_id:sessionId,prefix:base(profileId,sessionId),turn_count:actualTurnCount,turn_index_count:turns.length,block_count:blocks.length,latest_turn_no:latestTurnNo,latest_block_no:blocks.at(-1)?.block_no||0,current_memory_source_block_no:Number(current?.source_block_no||0),current_memory_available:!!current?.memory,stored_artifacts:{turn_index:'memory/.../turns/<turn>.json',compressed_blocks:'memory/.../blocks/<10-turn-range>.json',current_memory:'memory/.../current.json',original_request_response:'results/<trace_id>/request.txt + response.txt',active_session:'memory/<profile>/clients/<client_id>/active.json'}};
 }
 export async function saveMemoryBlock({profileId,sessionId,blockNo,startTurn,endTurn,memory,status='ready',error=null}){const now=new Date().toISOString();await putJson(blockPath(profileId,sessionId,blockNo),{schema_version:'1.0',profile_id:profileId,session_id:sessionId,block_no:blockNo,start_turn:startTurn,end_turn:endTurn,status,memory,error,updated_at:now});return true;}
 export async function saveMemoryState({profileId,sessionId,sourceBlockNo,memory}){await putJson(currentPath(profileId,sessionId),{schema_version:'1.0',profile_id:profileId,session_id:sessionId,source_block_no:sourceBlockNo,memory,updated_at:new Date().toISOString()});return true;}
