@@ -12,7 +12,6 @@ import {
   getRuntimeMemoryContext,
   compressPendingMemoryBlocks,
   recallMemory,
-  recommendedCompressionDelayMs,
   MEMORY_MODEL,
 } from '../src/memory-compression.js';
 import { conversationToken, verifyConversationToken } from '../src/conversation-auth.js';
@@ -20,7 +19,6 @@ import { MEMORY_BLOCK_SIZE, MEMORY_SCHEMA } from '../src/config.js';
 
 const decode = value => JSON.parse(Buffer.from(String(value || ''), 'base64url').toString('utf8'));
 const encode = value => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'private, no-store');
@@ -177,8 +175,6 @@ export default async function handler(req, res) {
               responseText: body.text,
               yukiState: body.yuki_state_echo || payload.yuki_state,
             });
-            const delay = recommendedCompressionDelayMs(body.rate_limit);
-            if (recorded?.compression_due && delay > 0) await sleep(delay);
             const compression = recorded?.compression_due
               ? await compressPendingMemoryBlocks({
                   profileId,
