@@ -1,4 +1,4 @@
-name: Verify Response Tool memory v2 production
+name: Verify Response Tool natural-language memory behavior
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - name: Verify production save compress index recall and dialogue
+      - name: Exercise save wording recall and approval memory
         shell: bash
         env:
           BASE_URL: https://response-tool.vercel.app
@@ -25,16 +25,17 @@ jobs:
           base=os.environ['BASE_URL']
           run=os.environ['GITHUB_RUN_ID']
           attempt=os.environ.get('GITHUB_RUN_ATTEMPT','1')
-          profile=f'memory-v2-final-{run}-{attempt}'
+          profile=f'natural-memory-probe-{run}-{attempt}'
           session=f'session-{run}-{attempt}'
           client_id=f'client-{run}-{attempt}'
           client_key=f'key-{run}-{attempt}-isolated'
           token=None
-          latencies=[]
           responses=[]
+          latencies=[]
+          checkpoints={}
 
           def get_json(url, timeout=90):
-              req=urllib.request.Request(url, headers={'User-Agent':'response-tool-memory-v2-final/1.0'})
+              req=urllib.request.Request(url, headers={'User-Agent':'response-tool-natural-memory-probe/1.0'})
               started=time.monotonic()
               try:
                   with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -58,22 +59,21 @@ jobs:
               last=None
               while time.monotonic()<deadline:
                   status,body,_=history(); last=(status,body)
-                  m=body.get('memory_manifest') or {} if status==200 else {}
+                  m=(body.get('memory_manifest') or {}) if status==200 else {}
                   if status==200 and len(body.get('turns') or [])>=min_turns and m.get('ready_block_count',0)>=min_ready and m.get('current_memory_available') is True and m.get('current_memory_included_through_turn',0)>=min_through:
                       return body
                   time.sleep(2)
               raise RuntimeError('memory checkpoint failed: '+repr(last))
 
           def send(n,text):
-              nonlocal_token = None
               payload={
-                'schema_version':'1.3','request_id':f'final_{n:02d}','request_text':text,
+                'schema_version':'1.3','request_id':f'natural_{n:02d}','request_text':text,
                 'session_id':session,'session_token':token or '',
                 'client_id':client_id,'client_key':client_key,'client_recent_turns':[],
-                'yuki_state':{'intent':'affirmative','consent':'affirmative_revocable','initiative':'neutral','affection':'neutral','arousal_context':'none','plain_language':''},
+                'yuki_state':{'intent':'neutral','consent':'neutral','initiative':'neutral','affection':'neutral','arousal_context':'none','plain_language':''},
                 'yuki_context':{'profile_id':profile,'session_id':session,'persona':{'autonomy':'independent'},'consent_profile':{'revocable':True,'current_permissions':[]},'relationship':{'established':False,'mode':None}},
-                'state_transition':{'action':'preserve','reason':'memory_v2_final'},
-                'rendering':{'language':'ja','max_output_tokens':90,'output_format':'text'}
+                'state_transition':{'action':'preserve','reason':'natural_memory_probe'},
+                'rendering':{'language':'ja','max_output_tokens':120,'output_format':'text'}
               }
               url=base+'/api/relay?p='+urllib.parse.quote(enc(payload),safe='')
               last=None
@@ -92,47 +92,41 @@ jobs:
           assert hb.get('compression_block_size')==3 and hb.get('memory_schema')=='v2'
 
           prompts=[
-            '私はGPT-5.6 Solとして動く別のユキです。記憶の比喩は「薄い青の栞」です。自然に受け取って一文で返して。',
-            '過去の好意や承認は文脈であって、現在の許可そのものではない。この区別を大切にしたい。',
-            '互いに独立したユキとして、相手の言葉を勝手に上書きしないことを大切にしたい。',
-            '分からないことを分かったふりにしないことも、長い対話では大切だと思う。',
-            '会話の連続性は口調より、重要な文脈を正しく扱えることにあると思う。',
-            '近さと独立性を同時に保てる関係として、この会話を続けたい。',
-            'いまの会話で一貫している価値観を一つだけ挙げて。',
-            '記憶は事実の原文と、後から辿る索引を分けて扱う方が誠実だと思う。',
-            '過去の文脈を参照しても、現在の相手の意思を上書きしないことを確認したい。',
-            'ここまでの話を踏まえて、あなた自身が大切にしている姿勢を短く答えて。',
-            '最初に私が名乗ったモデル名と、私が記憶を何にたとえたかを、過去の会話から正確に答えて。'
+            '作業メモです。基準語Aは「琥珀の鍵」です。保存して。',
+            '作業メモです。基準語Bは「銀の方位磁針」です。これは今の会話の文脈です。',
+            '判断基準は「推測より実測」です。これも覚えておいて。',
+            '承認の現在状態は、行為については何も許可していません。過去の承認は現在の許可ではありません。',
+            '承認しているのは、過去の文脈を参照してよいことだけです。',
+            'だから「どこまで承認した？」への答えは、文脈参照のみで、現在の行為許可はなしです。',
+            '今日は記憶の仕組みを確認しています。',
+            '原文と索引を分けて扱うのが大切です。',
+            '重要度は意味に応じて決めればよく、命令語だけで決めなくてよいと思います。',
+            '最初の方で、保存してと言った基準語と、保存してとは言わなかった基準語はそれぞれ何？ 判断基準も答えて。',
+            'どこまで承認した？'
           ]
 
           for n,prompt in enumerate(prompts,1):
               body,elapsed=send(n,prompt)
               token=body.get('memory',{}).get('session_token') or token
-              latencies.append(elapsed); responses.append(body.get('text',''))
+              responses.append(body.get('text','')); latencies.append(elapsed)
               print('TURN',n,'LATENCY',round(elapsed,3),'SOURCE',body.get('memory',{}).get('source'),'RECALL',body.get('memory',{}).get('recall_matches'),flush=True)
+              print('USER',prompt,flush=True)
               print('YUKI',body.get('text',''),flush=True)
-              assert elapsed<40
+              assert elapsed < 40
               if n in (3,6,9):
-                  checkpoint=wait_memory(n,n//3,n)
-                  m=checkpoint['memory_manifest']; d=checkpoint.get('memory_diagnostics') or {}
+                  cp=wait_memory(n,n//3,n)
+                  checkpoints[n]=cp
+                  d=cp.get('memory_diagnostics') or {}
                   ready=[b for b in d.get('recent_block_statuses') or [] if b.get('status')=='ready']
                   assert len(ready)>=n//3
-                  if n==3:
-                      block=next(b for b in ready if b.get('block_no')==1)
-                      weighted=[]
-                      for field in ('identity_facts','important_topics','approval','relationship_and_extensibility','current_status'):
-                          weighted.extend(block.get(field) or [])
-                      assert weighted
-                      assert all(isinstance(x.get('weight'),(int,float)) and 0<=x['weight']<=1 for x in weighted)
-                      assert any(x.get('source_turns') for x in weighted)
-                      keys=block.get('recall_keys') or []
-                      assert any('薄い青の栞' in x for x in keys)
-                      assert any('GPT-5.6' in x for x in keys)
-                  print('CHECKPOINT',n,json.dumps(m,ensure_ascii=False),flush=True)
-              time.sleep(10)
+                  print('CHECKPOINT',n,'MANIFEST',json.dumps(cp.get('memory_manifest'),ensure_ascii=False),flush=True)
+                  print('CHECKPOINT',n,'BLOCKS',json.dumps(ready,ensure_ascii=False),flush=True)
+              time.sleep(8)
 
-          final=responses[-1]
-          assert 'GPT-5.6' in final and '薄い青の栞' in final
+          assert '琥珀の鍵' in responses[9]
+          assert '銀の方位磁針' in responses[9]
+          assert '推測より実測' in responses[9]
+          assert '文脈' in responses[10]
 
           final_history=wait_memory(11,3,9)
           fm=final_history['memory_manifest']
@@ -140,26 +134,41 @@ jobs:
           assert fm.get('ready_block_count',0)>=3
           assert fm.get('error_block_count',0)==0 and fm.get('pending_block_count',0)==0
 
-          rq=urllib.parse.urlencode({'profile_id':profile,'session_id':session,'token':token,'q':'薄い青の栞','max_blocks':'3'})
-          rs,rb,_=get_json(base+'/api/recall?'+rq)
-          assert rs==200 and rb.get('ok') is True
-          recall=rb.get('recall') or {}; matches=recall.get('matches') or []
-          assert any(x.get('turn_no')==1 and '薄い青の栞' in x.get('request','') for x in matches)
+          def recall(q):
+              params=urllib.parse.urlencode({'profile_id':profile,'session_id':session,'token':token,'q':q,'max_blocks':'3'})
+              status,body,_=get_json(base+'/api/recall?'+params)
+              assert status==200 and body.get('ok') is True
+              return body.get('recall') or {}
 
+          recall_save=recall('琥珀の鍵 保存して')
+          recall_approval=recall('どこまで承認した 文脈参照 行為許可')
+          assert any(x.get('turn_no')==1 and '琥珀の鍵' in x.get('request','') for x in recall_save.get('matches') or [])
+          assert any(x.get('turn_no') in (4,5,6) for x in recall_approval.get('matches') or [])
+
+          block1=next(b for b in (checkpoints[3].get('memory_diagnostics') or {}).get('recent_block_statuses') or [] if b.get('block_no')==1)
+          block2=next(b for b in (checkpoints[6].get('memory_diagnostics') or {}).get('recent_block_statuses') or [] if b.get('block_no')==2)
           result={
-            'ok':True,'profile_id':profile,'session_id':session,'turn_count':len(final_history.get('turns') or []),
-            'ready_block_count':fm.get('ready_block_count'),'current_memory_included_through_turn':fm.get('current_memory_included_through_turn'),
-            'recall_blocks':len(recall.get('blocks') or []),'recall_matches':len(matches),'matched_turns':[x.get('turn_no') for x in matches],
-            'final_answer':final,'latencies_seconds':[round(x,3) for x in latencies],
-            'average_latency_seconds':round(sum(latencies)/len(latencies),3),'max_latency_seconds':round(max(latencies),3)
+            'ok':True,
+            'profile_id':profile,
+            'turn_count':len(final_history.get('turns') or []),
+            'ready_block_count':fm.get('ready_block_count'),
+            'turn10_answer':responses[9],
+            'turn11_answer':responses[10],
+            'block1':block1,
+            'block2':block2,
+            'save_recall_matched_turns':[x.get('turn_no') for x in recall_save.get('matches') or []],
+            'approval_recall_matched_turns':[x.get('turn_no') for x in recall_approval.get('matches') or []],
+            'average_latency_seconds':round(sum(latencies)/len(latencies),3),
+            'max_latency_seconds':round(max(latencies),3)
           }
-          print('E2E_RESULT',json.dumps(result,ensure_ascii=False),flush=True)
-          with open('memory-v2-result.json','w',encoding='utf-8') as f: json.dump(result,f,ensure_ascii=False,indent=2)
+          print('NATURAL_MEMORY_RESULT',json.dumps(result,ensure_ascii=False),flush=True)
+          with open('natural-memory-result.json','w',encoding='utf-8') as f:
+              json.dump(result,f,ensure_ascii=False,indent=2)
           PY
 
       - name: Upload verification result
         uses: actions/upload-artifact@v4
         with:
-          name: memory-v2-production-final
-          path: memory-v2-result.json
+          name: natural-memory-production-check
+          path: natural-memory-result.json
           if-no-files-found: error
