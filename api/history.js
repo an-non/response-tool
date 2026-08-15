@@ -1,5 +1,6 @@
 import {
   getHistory,
+  getTurnsRange,
   getMemoryDiagnostics,
   getStorageManifest,
   memoryBlobConfigured,
@@ -13,13 +14,51 @@ const json = (res, status, body) => {
   res.end(JSON.stringify(body));
 };
 
+function memoryTurnFloor(manifest, diagnostics) {
+  const blocks = diagnostics?.recent_block_statuses || [];
+  const blockFloor = blocks
+    .filter(block => block?.status === 'ready' || block?.status === 'degraded')
+    .reduce((max, block) => Math.max(max, Number(block?.end_turn || 0)), 0);
+  return Math.max(
+    Number(manifest?.latest_turn_no || 0),
+    Number(manifest?.current_memory_included_through_turn || 0),
+    blockFloor,
+  );
+}
+
+async function reconciledHistory(profile, session, limit, manifest, diagnostics) {
+  const turns = await getHistory(profile, session, limit);
+  const lastTurn = turns.reduce((max, turn) => Math.max(max, Number(turn?.turn_no || 0)), 0);
+  const floor = memoryTurnFloor(manifest, diagnostics);
+  if (floor <= lastTurn) return turns;
+
+  const missing = await getTurnsRange(profile, session, lastTurn + 1, floor);
+  const byTurn = new Map();
+  for (const turn of [...turns, ...missing]) byTurn.set(Number(turn.turn_no), turn);
+  return [...byTurn.values()]
+    .sort((left, right) => Number(left.turn_no) - Number(right.turn_no))
+    .slice(-Math.max(1, Math.min(Number(limit) || 30, 100)));
+}
+
 async function responseForSession(req, res, profile, session, updatedAt = null) {
   const includeMemory = String(req.query?.include_memory || '') === '1';
-  const [turns, manifest, diagnostics] = await Promise.all([
-    getHistory(profile, session, req.query?.limit),
+  const [manifest, diagnostics] = await Promise.all([
     getStorageManifest(profile, session),
     includeMemory ? getMemoryDiagnostics(profile, session, req.query?.memory_limit) : Promise.resolve(null)
   ]);
+  const turns = await reconciledHistory(profile, session, req.query?.limit, manifest, diagnostics);
+  const reconciledTurnCount = Math.max(
+    Number(manifest?.turn_count || 0),
+    turns.reduce((max, turn) => Math.max(max, Number(turn?.turn_no || 0)), 0),
+    memoryTurnFloor(manifest, diagnostics),
+  );
+  const reconciledManifest = {
+    ...manifest,
+    turn_count: reconciledTurnCount,
+    turn_index_count: Math.max(Number(manifest?.turn_index_count || 0), reconciledTurnCount),
+    latest_turn_no: Math.max(Number(manifest?.latest_turn_no || 0), reconciledTurnCount),
+    history_reconciled: reconciledTurnCount > Number(manifest?.turn_count || 0),
+  };
   return json(res, 200, {
     ok: true,
     profile_id: profile,
@@ -27,7 +66,7 @@ async function responseForSession(req, res, profile, session, updatedAt = null) 
     session_token: conversationToken(profile, session),
     updated_at: updatedAt,
     turns,
-    memory_manifest: manifest,
+    memory_manifest: reconciledManifest,
     memory_diagnostics: diagnostics
   });
 }
