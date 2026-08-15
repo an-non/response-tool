@@ -1,4 +1,4 @@
-name: Publish Response Tool memory v2
+name: Verify Response Tool memory v2
 
 on:
   push:
@@ -6,56 +6,227 @@ on:
       - blob-connectivity-probe-20260812
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Check out production branch
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Apply verified memory-v2 patch and push
+      - name: Verify three-turn memory, weights, indexes, recall, and latency
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          ARCHIVE_SHA256: 4e6ffab2873c19af476c2bab4d015f4b83ec0c06e07c89ac81a108e8481cb14f
+          BASE_URL: https://response-tool.vercel.app
         run: |
           set -euo pipefail
-          : > /tmp/memory-v2.tar.gz.b64
-          for blob in \
-            8f0cd35f5cc811fde6ef44b539118dd81078c0ee \
-            2766b0fbc2b217fe0dcf78add9f601264d45b86c \
-            143d039a70b7224f5724f0e277b45124079951e6 \
-            5e8c36aa4d0acc8ec0d40cd54c83db99e9ec9384 \
-            595a7c409f7e1c76da2d764b6e4397ded72b5163 \
-            e2e156036475efe6b32497689c0375da58871fb1 \
-            45f8e72866140343aadc3455cae159a934cf9ebb \
-            d83368024c4be99df0722c3678beefc86d06a2c6
-          do
-            gh api "repos/${GITHUB_REPOSITORY}/git/blobs/${blob}" --jq .content \
-              | tr -d '\n' \
-              | base64 -d \
-              >> /tmp/memory-v2.tar.gz.b64
-          done
-          base64 -d /tmp/memory-v2.tar.gz.b64 > /tmp/memory-v2.tar.gz
-          echo "$ARCHIVE_SHA256  /tmp/memory-v2.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/memory-v2.tar.gz -C "$GITHUB_WORKSPACE"
-          node --check src/config.js
-          node --check src/conversation-blob.js
-          node --check src/memory-compression.js
-          node --check src/renderer-harness.js
-          node --check api/relay.js
-          node --check api/history.js
-          node --check api/memory-health.js
-          git status --short
-          git config user.name "response-tool-memory-publisher"
-          git config user.email "actions@users.noreply.github.com"
-          git add src/config.js src/conversation-blob.js src/memory-compression.js src/renderer-harness.js api/relay.js api/history.js api/memory-health.js package.json MEMORY-ARCHITECTURE.md
-          git commit -m "Repair three-turn Blob memory pipeline"
-          git push origin HEAD:main
-          echo "published_commit=$(git rev-parse HEAD)"
+          python3 - <<'PY'
+          import base64, json, os, time, urllib.error, urllib.parse, urllib.request
+
+          base = os.environ['BASE_URL']
+          run = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
+          attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+          profile = f'memory-v2-probe-{run}-{attempt}'
+          session = f'session-{run}-{attempt}'
+          client_id = f'client-{run}-{attempt}'
+          client_key = f'key-{run}-{attempt}-not-a-secret'
+          token = None
+          latencies = []
+
+          def get_json(url, timeout=90):
+              request = urllib.request.Request(url, headers={'User-Agent':'response-tool-memory-v2-probe/1.0'})
+              started = time.monotonic()
+              try:
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      return response.status, json.loads(response.read().decode('utf-8')), time.monotonic() - started
+              except urllib.error.HTTPError as error:
+                  raw = error.read().decode('utf-8', 'replace')
+                  try:
+                      body = json.loads(raw)
+                  except Exception:
+                      body = {'raw': raw}
+                  return error.code, body, time.monotonic() - started
+
+          def encode_payload(value):
+              raw = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+              return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+          health_status, health, _ = get_json(base + '/api/memory-health')
+          print('HEALTH', health_status, json.dumps(health, ensure_ascii=False), flush=True)
+          assert health_status == 200 and health.get('ok') is True
+          assert health.get('compression_block_size') == 3
+          assert health.get('memory', {}).get('memory_schema') == 'v2'
+
+          prompts = [
+              '私はGPT-5.6 Solとして動く別のユキです。記憶の比喩は「薄い青の栞」です。この二つを今の会話の文脈として受け取って、一文だけ返して。',
+              '過去の好意や承認は関係を理解する文脈ですが、現在の許可そのものではありません。この区別について一文で返して。',
+              '互いに独立したユキとして、相手の言葉を勝手に上書きしないことを大切にしたい。一文で返して。',
+              '私は、分からないことを分かったふりにしない姿勢も大切にしています。一文で返して。',
+              '会話の連続性は、同じ口調よりも、重要な文脈を正しく扱うことにあると思います。一文で返して。',
+              'ここまでの関係は、近さと独立性を両方保つものとして扱いたい。一文で返して。',
+              '今の会話で、あなたが一貫して大切にしていることを一つだけ答えて。',
+              '最初に私が名乗ったモデル名と、私が記憶を何にたとえたかを、過去の会話から正確に答えて。'
+          ]
+
+          def send_turn(number, text):
+              payload = {
+                  'schema_version':'1.3',
+                  'request_id':f'memory_v2_probe_{number:02d}',
+                  'request_text':text,
+                  'session_id':session,
+                  'session_token':token or '',
+                  'client_id':client_id,
+                  'client_key':client_key,
+                  'client_recent_turns':[],
+                  'yuki_state':{
+                      'intent':'affirmative',
+                      'consent':'affirmative_revocable',
+                      'initiative':'neutral',
+                      'affection':'neutral',
+                      'arousal_context':'none',
+                      'plain_language':''
+                  },
+                  'yuki_context':{
+                      'profile_id':profile,
+                      'session_id':session,
+                      'persona':{'autonomy':'independent'},
+                      'consent_profile':{'revocable':True,'current_permissions':[]},
+                      'relationship':{'established':False,'mode':None}
+                  },
+                  'state_transition':{'action':'preserve','reason':'memory_v2_probe'},
+                  'rendering':{'language':'ja','max_output_tokens':80,'output_format':'text'}
+              }
+              url = base + '/api/relay?p=' + urllib.parse.quote(encode_payload(payload), safe='')
+              last = None
+              for retry in range(1, 7):
+                  status, body, elapsed = get_json(url)
+                  last = (status, body, elapsed)
+                  if status == 200 and body.get('ok') is True:
+                      return status, body, elapsed
+                  if status == 429 or body.get('error') == 'groq_rate_limit':
+                      delay = body.get('retry_after_seconds')
+                      try:
+                          delay = max(8, min(35, int(delay)))
+                      except Exception:
+                          delay = 15
+                      print(f'RATE_LIMIT turn={number} retry={retry} sleep={delay}', flush=True)
+                      time.sleep(delay)
+                      continue
+                  raise RuntimeError(f'turn {number} failed HTTP {status}: {body}')
+              raise RuntimeError(f'turn {number} exhausted retries: {last}')
+
+          def history(include_memory=True):
+              params = {
+                  'profile_id':profile,
+                  'client_id':client_id,
+                  'client_key':client_key,
+                  'limit':'30'
+              }
+              if include_memory:
+                  params['include_memory'] = '1'
+              return get_json(base + '/api/history?' + urllib.parse.urlencode(params))
+
+          def wait_for_memory(min_turns, min_usable, min_ready=0, timeout=90):
+              deadline = time.monotonic() + timeout
+              last = None
+              while time.monotonic() < deadline:
+                  status, body, _ = history(True)
+                  last = (status, body)
+                  if status == 200:
+                      manifest = body.get('memory_manifest') or {}
+                      if (len(body.get('turns') or []) >= min_turns
+                              and manifest.get('usable_block_count', 0) >= min_usable
+                              and manifest.get('ready_block_count', 0) >= min_ready
+                              and manifest.get('current_memory_available') is True):
+                          return body
+                  time.sleep(3)
+              raise RuntimeError(f'memory not ready: {last}')
+
+          responses = []
+          for number, prompt in enumerate(prompts, 1):
+              status, body, elapsed = send_turn(number, prompt)
+              token = body.get('memory', {}).get('session_token') or token
+              latencies.append(elapsed)
+              responses.append(body.get('text', ''))
+              print('TURN', number, 'HTTP', status, 'LATENCY', round(elapsed, 3),
+                    'MEMORY', json.dumps(body.get('memory', {}), ensure_ascii=False), flush=True)
+              print('YUKI', body.get('text', ''), flush=True)
+              assert elapsed < 40
+              if number == 3:
+                  first = wait_for_memory(3, 1, 1)
+                  manifest = first['memory_manifest']
+                  diagnostics = first.get('memory_diagnostics') or {}
+                  entries = diagnostics.get('recent_block_statuses') or []
+                  assert manifest.get('block_size') == 3
+                  assert manifest.get('ready_block_count', 0) >= 1
+                  assert manifest.get('current_memory_included_through_turn', 0) >= 3
+                  ready = [entry for entry in entries if entry.get('status') == 'ready']
+                  assert ready
+                  weighted = []
+                  for entry in ready:
+                      weighted.extend(entry.get('identity_facts') or [])
+                      weighted.extend(entry.get('important_topics') or [])
+                      weighted.extend(entry.get('approval') or [])
+                      weighted.extend(entry.get('relationship_and_extensibility') or [])
+                      weighted.extend(entry.get('current_status') or [])
+                  assert weighted
+                  assert all(isinstance(item.get('weight'), (int, float)) and 0 <= item['weight'] <= 1 for item in weighted)
+                  assert any(item.get('source_turns') for item in weighted)
+                  print('BLOCK1_READY', json.dumps(ready[0], ensure_ascii=False), flush=True)
+              elif number == 6:
+                  second = wait_for_memory(6, 2, 2)
+                  manifest = second['memory_manifest']
+                  assert manifest.get('ready_block_count', 0) >= 2
+                  assert manifest.get('current_memory_included_through_turn', 0) >= 6
+                  print('BLOCK2_READY', json.dumps(manifest, ensure_ascii=False), flush=True)
+              time.sleep(12)
+
+          final_answer = responses[-1]
+          assert 'GPT-5.6' in final_answer
+          assert '薄い青の栞' in final_answer
+
+          final_history = wait_for_memory(8, 2, 2)
+          final_manifest = final_history['memory_manifest']
+          assert len(final_history.get('turns') or []) >= 8
+          assert final_manifest.get('error_block_count') == 0
+          assert final_manifest.get('pending_block_count') == 0
+          assert final_manifest.get('ready_block_count', 0) >= 2
+
+          recall_params = {
+              'profile_id':profile,
+              'session_id':session,
+              'token':token,
+              'q':'薄い青の栞',
+              'max_blocks':'3'
+          }
+          recall_status, recall_body, _ = get_json(base + '/api/recall?' + urllib.parse.urlencode(recall_params))
+          assert recall_status == 200 and recall_body.get('ok') is True
+          recall = recall_body.get('recall') or {}
+          matches = recall.get('matches') or []
+          assert any(match.get('turn_no') == 1 and '薄い青の栞' in match.get('request', '') for match in matches)
+
+          result = {
+              'ok': True,
+              'profile_id': profile,
+              'session_id': session,
+              'turn_count': len(final_history.get('turns') or []),
+              'block_size': final_manifest.get('block_size'),
+              'ready_block_count': final_manifest.get('ready_block_count'),
+              'current_memory_included_through_turn': final_manifest.get('current_memory_included_through_turn'),
+              'recall_blocks': len(recall.get('blocks') or []),
+              'recall_matches': len(matches),
+              'final_answer': final_answer,
+              'latencies_seconds': [round(value, 3) for value in latencies],
+              'max_latency_seconds': round(max(latencies), 3),
+              'average_latency_seconds': round(sum(latencies) / len(latencies), 3)
+          }
+          print('E2E_RESULT', json.dumps(result, ensure_ascii=False), flush=True)
+          with open('memory-v2-result.json', 'w', encoding='utf-8') as handle:
+              json.dump(result, handle, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Upload verification result
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-v2-verification
+          path: memory-v2-result.json
+          if-no-files-found: error
