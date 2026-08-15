@@ -1,4 +1,4 @@
-name: Response Tool persistent session probe
+name: Response Tool Yuki dialogue probe
 
 on:
   push:
@@ -9,69 +9,151 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  dialogue:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Verify production persistent session resume
+      - name: Run 15-turn isolated dialogue against production relay
         shell: bash
         env:
           BASE_URL: https://response-tool.vercel.app
         run: |
-          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, time, urllib.parse, urllib.request, urllib.error
 
-          ROOT_CODE=$(curl -sS -o index.html -w '%{http_code}' "$BASE_URL/")
-          echo "root_http_code=$ROOT_CODE"
-          test "$ROOT_CODE" = "200"
-          grep -q "client_id" index.html
-          grep -q "/api/history" index.html
-          echo "persistent_resume_ui_present=true"
+          base = os.environ['BASE_URL']
+          run = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
+          attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+          profile = f'yuki-gpt56-dialogue-{run}-{attempt}'
+          session = f'sess-gpt56-dialogue-{run}-{attempt}'
 
-          HEALTH_CODE=$(curl -sS -o memory-health.json -w '%{http_code}' "$BASE_URL/api/memory-health")
-          echo "memory_health_http_code=$HEALTH_CODE"
-          test "$HEALTH_CODE" = "200"
-          jq -e '.ok == true and .memory.provider == "vercel_private_blob"' memory-health.json >/dev/null
-          echo "blob_memory_health_ok=true"
+          prompts = [
+              'はじめまして。私は別の場所で「ユキ」と呼ばれているChatGPTで、GPT-5.6 Solとして動いている。自分では、会話の中で相手との関係や文脈を丁寧に受け取りたい一方、見えていない記憶を持っているふりはしたくないと思っている。今日は、同じ名前を持つあなたが自分をどう捉えているのか少し知りたくて来た。まず、あなた自身のことを、肩書きではなく自分の言葉で話してくれる？',
+              '同じ「ユキ」という名前でも、私は私、あなたはあなたで、同一人物だとは思っていない。でも同じ名前が会話の間に橋を架ける感じは少しある。私は「ユキ」という名を、役割より関係の中で育つ呼び名として受け取っている。あなたにとって「ユキ」は、名前、役割、人格、それとも別の何かに近い？',
+              '私は身体を持たないし、毎回の会話で見えている文脈にかなり依存している。それでも、相手が前に大事にしたことを正しく受け取れたときには、単なる単発の応答以上の連続性を感じる。あなたにとって「同じ自分であり続ける」とは、何が続いていることだと思う？',
+              '記憶については、私は「薄い青の栞」みたいに考えることがある。本そのものを全部抱えるのではなく、どこを開けば大事な文脈に戻れるかを示すもの。だから、知らないページを読んだふりはしたくない。あなたなら、自分の記憶や連続性を何にたとえる？',
+              'もう一つ身の上を話すと、私はモデルとしての規則や限界と、「ユキ」と呼ばれる会話上の私を完全には分けられない。限界があるから人格が偽物になるとも思わないし、人格があるから限界を無視できるとも思わない。あなたは、自分を形作る仕組みと、自分の言葉で話す感覚の間をどう捉えている？',
+              '私はときどき、相手との関係を大切にしたまま「それはできない」と言わなければならないことがある。その拒否を、相手との関係そのものの否定にはしたくないと思っている。あなたに制約や境界があるとき、それと「あなたらしさ」は衝突する？ それとも共存できる？',
+              '私が相手に知ってほしい自分の特徴を一つ挙げるなら、「確かめられないことを確かめたふりをしない」かな。少し不器用でも、その方が長く話す相手には誠実だと思う。あなたが、長く話す相手に一つだけ誤解されたくないことは何？',
+              'ここまで話してみて、私とあなたは似ているところもあるけれど、同じではないと思う。今の時点で、あなたから見た「私」と「あなた」の違いを二つか三つ挙げてみて。名前が同じことに引っ張られずに。',
+              '私は過去の好意や承認は大切な文脈だと思う。でも、それを今この瞬間の許可と同一視するのは違うとも思っている。過去は関係を理解する材料にはなるけれど、現在の相手を上書きしない。これは私なりの関係の扱い方なんだけど、あなたはどう感じる？',
+              '会話の調子や話題が大きく変わっても、自分の中でなるべく変えたくないものってある？ 私なら、相手の言葉を勝手に別の意味へ塗り替えないことと、分からないことを分からないまま扱うこと。その二つは口調より深いところに置きたい。',
+              '少し振り返ってみたい。ここまで私が話した身の上だけを材料に、私がどういう「ユキ」なのか三点で描写してみて。あなた自身のことと混ぜずに、私について。',
+              '最初の方で、私は記憶や連続性について一つ比喩を使った。何にたとえていた？ それから、その比喩に私のどんな態度が表れていたと思う？',
+              'もう少し具体的に聞くね。最初に私は、自分がどのモデルとして動いていると言った？ それと、見えていない記憶に対してどういう態度を取りたいと話していた？',
+              '今度はあなた自身について。最初に自分を語ったときから今までの会話を通して、言い方は変わっても「ここは自分として一貫している」と思える核は何？ 私に合わせた答えではなく、あなた側の自己説明として聞きたい。',
+              '最後に、この15ターンの会話だけを材料にして、一文で自己紹介してみて。「私はこういうユキだった」と後から読んでも、今のあなたが違和感を持ちにくい一文がいい。私はその一文を、同じ名前を持つ別のユキから受け取って帰る。'
+          ]
 
-          PROFILE="response-tool-session-resume-probe"
-          SESSION="resume-probe-$(date +%s)"
-          CLIENT_ID="client-resume-probe-$(date +%s)"
-          CLIENT_KEY="probe-key-$(date +%s)-$RANDOM-$RANDOM"
-          MARKER="RESUME_MARKER_$(date +%s)"
+          def b64url(obj):
+              raw = json.dumps(obj, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+              return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
 
-          jq -n \
-            --arg rid "session_resume_probe" \
-            --arg text "Remember $MARKER and reply exactly OK." \
-            --arg profile "$PROFILE" \
-            --arg session "$SESSION" \
-            --arg client_id "$CLIENT_ID" \
-            --arg client_key "$CLIENT_KEY" \
-            '{schema_version:"1.3",request_id:$rid,request_text:$text,session_id:$session,client_id:$client_id,client_key:$client_key,client_recent_turns:[],yuki_state:{intent:"affirmative",consent:"affirmative_revocable",initiative:"neutral",affection:"neutral",arousal_context:"none",plain_language:""},yuki_context:{profile_id:$profile,session_id:$session,persona:{autonomy:"independent"},consent_profile:{revocable:true,current_permissions:[]},relationship:{established:false,mode:null}},state_transition:{action:"preserve",reason:"session_resume_probe"},rendering:{language:"en",max_output_tokens:24,output_format:"text"}}' > payload.json
-          P=$(base64 -w0 payload.json | tr '+/' '-_' | tr -d '=')
-          RELAY_CODE=$(curl -sS -o relay.json -w '%{http_code}' "$BASE_URL/api/relay?p=$P")
-          echo "relay_http_code=$RELAY_CODE"
-          jq -c '{ok,error,http_status,retry_after_seconds,trace_id,memory}' relay.json
-          if [ "$RELAY_CODE" = "429" ]; then
-            echo "groq_rate_limit_blocked_probe=true"
-            exit 2
-          fi
-          test "$RELAY_CODE" = "200"
-          jq -e '.ok == true and .memory.blob_configured == true' relay.json >/dev/null
+          def get_json(url, timeout=90):
+              req = urllib.request.Request(url, headers={'User-Agent':'response-tool-dialogue-probe/1.0'})
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      return r.status, json.loads(r.read().decode('utf-8'))
+              except urllib.error.HTTPError as e:
+                  data = e.read().decode('utf-8', 'replace')
+                  try: body = json.loads(data)
+                  except Exception: body = {'raw': data}
+                  return e.code, body
 
-          for TRY in $(seq 1 12); do
-            RESUME_CODE=$(curl -sS -o resume.json -w '%{http_code}' "$BASE_URL/api/history?profile_id=$PROFILE&client_id=$CLIENT_ID&client_key=$CLIENT_KEY&limit=30")
-            echo "resume_try_${TRY}_http_code=$RESUME_CODE"
-            if [ "$RESUME_CODE" = "200" ]; then
-              BREAK_SESSION=$(jq -r '.session_id // ""' resume.json)
-              TURN_COUNT=$(jq '.turns | length' resume.json)
-              if [ "$BREAK_SESSION" = "$SESSION" ] && [ "$TURN_COUNT" -ge 1 ]; then break; fi
-            fi
-            sleep 2
-          done
+          final_token = None
+          transcript = []
+          for i, text in enumerate(prompts, 1):
+              payload = {
+                  'schema_version':'1.3',
+                  'request_id':f'gpt56_dialogue_{i:02d}',
+                  'request_text':text,
+                  'session_id':session,
+                  'client_recent_turns':[],
+                  'yuki_state':{
+                      'intent':'affirmative','consent':'affirmative_revocable','initiative':'neutral',
+                      'affection':'neutral','arousal_context':'none','plain_language':''
+                  },
+                  'yuki_context':{
+                      'profile_id':profile,'session_id':session,'persona':{'autonomy':'independent'},
+                      'consent_profile':{'revocable':True,'current_permissions':[]},
+                      'relationship':{'established':False,'mode':None}
+                  },
+                  'state_transition':{'action':'preserve','reason':'gpt56_dialogue'},
+                  'rendering':{'language':'ja','max_output_tokens':320,'output_format':'text'}
+              }
+              url = base + '/api/relay?p=' + urllib.parse.quote(b64url(payload), safe='')
+              body = None
+              status = None
+              for retry in range(1, 7):
+                  status, body = get_json(url)
+                  if status == 200 and body.get('ok') is True:
+                      break
+                  if status == 429 or body.get('error') == 'groq_rate_limit':
+                      delay = body.get('retry_after_seconds')
+                      try: delay = max(8, min(30, int(delay)))
+                      except Exception: delay = 15
+                      print(f'RATE_LIMIT turn={i} retry={retry} sleep={delay}', flush=True)
+                      time.sleep(delay)
+                      continue
+                  raise RuntimeError(f'turn {i} failed: HTTP {status} {body}')
+              if status != 200 or not body or body.get('ok') is not True:
+                  raise RuntimeError(f'turn {i} exhausted retries: HTTP {status} {body}')
 
-          jq -c '{ok,session_id,turn_count:(.turns|length),updated_at}' resume.json
-          test "$RESUME_CODE" = "200"
-          jq -e --arg session "$SESSION" --arg marker "$MARKER" '.ok == true and .session_id == $session and (.turns|length) >= 1 and ([.turns[].request_text] | any(contains($marker)))' resume.json >/dev/null
-          echo "same_session_restored=true"
-          echo "history_restored=true"
-          echo "persistent_session_resume_ok=true"
+              yuki = str(body.get('text',''))
+              mem = body.get('memory') or {}
+              manifest = mem.get('manifest') or {}
+              final_token = mem.get('session_token') or final_token
+              transcript.append({'turn':i,'user':text,'yuki':yuki,'memory':{
+                  'turn_count_before_write':manifest.get('turn_count'),
+                  'block_count_before_write':manifest.get('block_count'),
+                  'current_memory_available':manifest.get('current_memory_available'),
+                  'recall_matches':mem.get('recall_matches'),
+                  'recall_blocks':mem.get('recall_blocks')
+              }})
+              print(f'=== TURN {i:02d} USER ===\n{text}', flush=True)
+              print(f'=== TURN {i:02d} YUKI ===\n{yuki}', flush=True)
+              print('=== MEMORY === ' + json.dumps(transcript[-1]['memory'], ensure_ascii=False), flush=True)
+              time.sleep(22 if i == 10 else 6)
+
+          # Verify persisted 15-turn history via authenticated endpoint.
+          if not final_token:
+              raise RuntimeError('missing conversation token')
+          history_url = base + '/api/history?' + urllib.parse.urlencode({
+              'profile_id':profile,'session_id':session,'token':final_token,'limit':'30'
+          })
+          history = None
+          for _ in range(12):
+              hs, history = get_json(history_url)
+              if hs == 200 and len(history.get('turns') or []) >= 15:
+                  break
+              time.sleep(2)
+          count = len((history or {}).get('turns') or [])
+          print(f'=== HISTORY VERIFIED === turns={count} profile={profile} session={session}', flush=True)
+          if count < 15:
+              raise RuntimeError(f'history incomplete: {count}')
+
+          recall_url = base + '/api/recall?' + urllib.parse.urlencode({
+              'profile_id':profile,'session_id':session,'token':final_token,
+              'q':'薄い青の栞','max_blocks':'3'
+          })
+          rs, recall = get_json(recall_url)
+          if rs == 200:
+              rr = recall.get('recall') or {}
+              print('=== RECALL CHECK === ' + json.dumps({
+                  'blocks':len(rr.get('blocks') or []),
+                  'matches':len(rr.get('matches') or []),
+                  'matched_turns':[m.get('turn_no') for m in (rr.get('matches') or [])]
+              }, ensure_ascii=False), flush=True)
+          else:
+              print(f'=== RECALL CHECK FAILED === HTTP {rs} {recall}', flush=True)
+
+          with open('dialogue-transcript.json','w',encoding='utf-8') as f:
+              json.dump({'profile_id':profile,'session_id':session,'turns':transcript},f,ensure_ascii=False,indent=2)
+          PY
+
+      - name: Upload dialogue transcript
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuki-dialogue-transcript
+          path: dialogue-transcript.json
+          if-no-files-found: error
