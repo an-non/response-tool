@@ -1,6 +1,6 @@
 {
   "name": "yuki-relay",
-  "version": "1.6.1-blob-memory",
+  "version": "1.7.0-blob-memory-v2",
   "private": true,
   "type": "module",
   "engines": {
