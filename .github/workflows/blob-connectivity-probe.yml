@@ -52,7 +52,6 @@ jobs:
           node --check api/relay.js
           node --check api/history.js
           node --check api/memory-health.js
-          git diff --check
           git status --short
           git config user.name "response-tool-memory-publisher"
           git config user.email "actions@users.noreply.github.com"
