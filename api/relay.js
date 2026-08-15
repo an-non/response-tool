@@ -4,6 +4,7 @@ import {
   memoryBlobConfigured,
   recordConversationTurn,
   getMemorySnapshot,
+  saveMemoryState,
   bindActiveSession,
   resolveActiveSession,
   readSessionManifest,
@@ -25,6 +26,77 @@ const json = (res, status, body) => {
   res.setHeader('Cache-Control', 'private, no-store');
   res.end(JSON.stringify(body));
 };
+const array = value => Array.isArray(value) ? value : [];
+const clamp = value => Math.max(0, Math.min(1, Number(value) || 0));
+const memoryKey = value => String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+
+function mergeWeighted(previous, latest, key, limit = 24, replace = false) {
+  if (replace && array(latest).length) return array(latest).slice(0, limit);
+  const map = new Map();
+  for (const item of array(previous)) {
+    const label = String(item?.[key] || '').slice(0, 160);
+    if (!label) continue;
+    map.set(memoryKey(label), {
+      ...item,
+      [key]: label,
+      weight: clamp(item?.weight),
+      source_turns: array(item?.source_turns).map(Number).filter(Number.isInteger).slice(-18),
+    });
+  }
+  for (const item of array(latest)) {
+    const label = String(item?.[key] || '').slice(0, 160);
+    if (!label) continue;
+    const id = memoryKey(label);
+    const old = map.get(id);
+    map.set(id, {
+      [key]: label,
+      weight: Math.max(clamp(item?.weight), clamp(old?.weight)),
+      note: String(item?.note || old?.note || '').slice(0, 300),
+      source_turns: [...new Set([
+        ...array(old?.source_turns).map(Number),
+        ...array(item?.source_turns).map(Number),
+      ].filter(Number.isInteger))].slice(-18),
+    });
+  }
+  return [...map.values()].sort((a, b) => b.weight - a.weight).slice(0, limit);
+}
+
+function mergeStrings(previous, latest, limit) {
+  const output = [];
+  const seen = new Set();
+  for (const value of [...array(latest), ...array(previous)]) {
+    const text = String(value || '').slice(0, 240).trim();
+    const id = memoryKey(text);
+    if (!text || seen.has(id)) continue;
+    seen.add(id);
+    output.push(text);
+    if (output.length >= limit) break;
+  }
+  return output;
+}
+
+function mergeFreshBlock(previous, latest) {
+  if (!latest) return previous || null;
+  const prior = previous || {};
+  const priorSummary = String(prior.summary || '').slice(0, 900);
+  const latestSummary = String(latest.summary || '').slice(0, 900);
+  return {
+    schema_version: '1.2',
+    source_block_no: Number(latest.block_no || prior.source_block_no || 0),
+    included_through_turn: Number(array(latest.turn_range).at(-1) || prior.included_through_turn || 0),
+    summary: [priorSummary, latestSummary].filter(Boolean).join(' / Latest: ').slice(0, 1600),
+    identity_facts: mergeWeighted(prior.identity_facts, latest.identity_facts, 'label', 24),
+    important_topics: mergeWeighted(prior.important_topics, latest.important_topics, 'topic', 24),
+    approval: mergeWeighted(prior.approval, latest.approval, 'label', 18),
+    conversation_flow: mergeWeighted(prior.conversation_flow, latest.conversation_flow, 'label', 18),
+    relationship_and_extensibility: mergeWeighted(prior.relationship_and_extensibility, latest.relationship_and_extensibility, 'label', 18),
+    current_status: mergeWeighted(prior.current_status, latest.current_status, 'label', 12, true),
+    recall_keys: mergeStrings(prior.recall_keys, latest.recall_keys, 40),
+    unresolved: mergeStrings(prior.unresolved, latest.unresolved, 20),
+    authority: 'derived_context_only',
+    can_grant_consent: false,
+  };
+}
 
 async function resolveMemorySession(payload, profileId) {
   const suppliedSessionId = String(payload?.session_id || payload?.yuki_context?.session_id || 'default');
@@ -178,7 +250,10 @@ export default async function handler(req, res) {
             });
 
             let compression = { due_block_nos: [], results: [] };
-            if (recorded?.compression_due && recorded?.block_no) {
+            const isBlockBoundary = Number(recorded?.turn_no || 0) > 0
+              && Number(recorded.turn_no) % MEMORY_BLOCK_SIZE === 0;
+
+            if (isBlockBoundary && recorded?.block_no) {
               const direct = await compressMemoryBlock({
                 profileId,
                 sessionId,
@@ -186,6 +261,15 @@ export default async function handler(req, res) {
                 currentState: body.yuki_state_echo || payload.yuki_state,
               });
               compression = { due_block_nos: [recorded.block_no], results: [direct] };
+              if (direct?.memory) {
+                const merged = mergeFreshBlock(payload.memory_context, direct.memory);
+                await saveMemoryState({
+                  profileId,
+                  sessionId,
+                  sourceBlockNo: recorded.block_no,
+                  memory: merged,
+                });
+              }
             } else {
               compression = await compressPendingMemoryBlocks({
                 profileId,
@@ -193,6 +277,16 @@ export default async function handler(req, res) {
                 currentState: body.yuki_state_echo || payload.yuki_state,
                 maxBlocks: 1,
               });
+              const latestUsable = [...compression.results].reverse().find(result => result?.memory);
+              if (latestUsable?.memory) {
+                const merged = mergeFreshBlock(payload.memory_context, latestUsable.memory);
+                await saveMemoryState({
+                  profileId,
+                  sessionId,
+                  sourceBlockNo: latestUsable.block_no,
+                  memory: merged,
+                });
+              }
             }
 
             console.log(JSON.stringify({
