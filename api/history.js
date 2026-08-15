@@ -42,10 +42,8 @@ async function reconciledHistory(profile, session, limit, manifest, diagnostics)
 
 async function responseForSession(req, res, profile, session, updatedAt = null) {
   const includeMemory = String(req.query?.include_memory || '') === '1';
-  const [manifest, diagnostics] = await Promise.all([
-    getStorageManifest(profile, session),
-    includeMemory ? getMemoryDiagnostics(profile, session, req.query?.memory_limit) : Promise.resolve(null)
-  ]);
+  const diagnostics = includeMemory ? await getMemoryDiagnostics(profile, session, req.query?.memory_limit) : null;
+  const manifest = diagnostics?.manifest || await getStorageManifest(profile, session);
   const turns = await reconciledHistory(profile, session, req.query?.limit, manifest, diagnostics);
   const reconciledTurnCount = Math.max(
     Number(manifest?.turn_count || 0),
@@ -59,6 +57,10 @@ async function responseForSession(req, res, profile, session, updatedAt = null) 
     latest_turn_no: Math.max(Number(manifest?.latest_turn_no || 0), reconciledTurnCount),
     history_reconciled: reconciledTurnCount > Number(manifest?.turn_count || 0),
   };
+  const coherentDiagnostics = diagnostics ? {
+    ...diagnostics,
+    manifest: reconciledManifest,
+  } : null;
   return json(res, 200, {
     ok: true,
     profile_id: profile,
@@ -67,7 +69,7 @@ async function responseForSession(req, res, profile, session, updatedAt = null) 
     updated_at: updatedAt,
     turns,
     memory_manifest: reconciledManifest,
-    memory_diagnostics: diagnostics
+    memory_diagnostics: coherentDiagnostics
   });
 }
 
