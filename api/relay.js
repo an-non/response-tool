@@ -10,6 +10,7 @@ import {
 } from '../src/conversation-blob.js';
 import {
   getRuntimeMemoryContext,
+  compressMemoryBlock,
   compressPendingMemoryBlocks,
   recallMemory,
   MEMORY_MODEL,
@@ -175,14 +176,25 @@ export default async function handler(req, res) {
               responseText: body.text,
               yukiState: body.yuki_state_echo || payload.yuki_state,
             });
-            const compression = recorded?.compression_due
-              ? await compressPendingMemoryBlocks({
-                  profileId,
-                  sessionId,
-                  currentState: body.yuki_state_echo || payload.yuki_state,
-                  maxBlocks: 1,
-                })
-              : { due_block_nos: [], results: [] };
+
+            let compression = { due_block_nos: [], results: [] };
+            if (recorded?.compression_due && recorded?.block_no) {
+              const direct = await compressMemoryBlock({
+                profileId,
+                sessionId,
+                blockNo: recorded.block_no,
+                currentState: body.yuki_state_echo || payload.yuki_state,
+              });
+              compression = { due_block_nos: [recorded.block_no], results: [direct] };
+            } else {
+              compression = await compressPendingMemoryBlocks({
+                profileId,
+                sessionId,
+                currentState: body.yuki_state_echo || payload.yuki_state,
+                maxBlocks: 1,
+              });
+            }
+
             console.log(JSON.stringify({
               event: 'memory_post_response_complete',
               profile_id: profileId,
@@ -192,6 +204,7 @@ export default async function handler(req, res) {
               compression_results: compression.results.map(result => ({
                 block_no: result.block_no,
                 compressed: result.compressed,
+                usable: result.usable,
                 reason: result.reason || null,
               })),
             }));
