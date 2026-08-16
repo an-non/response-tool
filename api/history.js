@@ -7,6 +7,7 @@ import {
   resolveActiveSession
 } from '../src/conversation-blob.js';
 import { conversationToken, verifyConversationToken } from '../src/conversation-auth.js';
+import { ensureLegacySessionCompatibility } from '../src/legacy-memory-compat.js';
 
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -41,6 +42,7 @@ async function reconciledHistory(profile, session, limit, manifest, diagnostics)
 }
 
 async function responseForSession(req, res, profile, session, updatedAt = null) {
+  await ensureLegacySessionCompatibility(profile, session);
   const includeMemory = String(req.query?.include_memory || '') === '1';
   const diagnostics = includeMemory ? await getMemoryDiagnostics(profile, session, req.query?.memory_limit) : null;
   const manifest = diagnostics?.manifest || await getStorageManifest(profile, session);
@@ -81,12 +83,14 @@ export default async function handler(req, res) {
   try {
     const session = String(req.query?.session_id || '');
     const token = String(req.query?.token || '');
-    if (session && token) {
-      if (!verifyConversationToken(profile, session, token)) return json(res, 401, { ok: false, error: 'unauthorized' });
-      return responseForSession(req, res, profile, session);
-    }
     const clientId = String(req.query?.client_id || '');
     const clientKey = String(req.query?.client_key || '');
+    if (session && token && verifyConversationToken(profile, session, token)) {
+      return responseForSession(req, res, profile, session);
+    }
+    if (session && token && (!clientId || !clientKey)) {
+      return json(res, 401, { ok: false, error: 'unauthorized' });
+    }
     if (!clientId || !clientKey) return json(res, 400, { ok: false, error: 'session_token_or_client_credentials_required' });
     const active = await resolveActiveSession(profile, clientId, clientKey);
     if (active?.unauthorized) return json(res, 401, { ok: false, error: 'unauthorized' });

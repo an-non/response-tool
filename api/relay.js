@@ -18,6 +18,7 @@ import {
 } from '../src/memory-compression.js';
 import { conversationToken, verifyConversationToken } from '../src/conversation-auth.js';
 import { MEMORY_BLOCK_SIZE, MEMORY_SCHEMA } from '../src/config.js';
+import { ensureLegacySessionCompatibility, getLegacyCurrentMemory } from '../src/legacy-memory-compat.js';
 
 const decode = value => JSON.parse(Buffer.from(String(value || ''), 'base64url').toString('utf8'));
 const encode = value => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
@@ -104,6 +105,17 @@ async function resolveMemorySession(payload, profileId) {
   const clientKey = String(payload?.client_key || '');
   const sessionToken = String(payload?.session_token || '');
 
+  if (sessionToken && verifyConversationToken(profileId, suppliedSessionId, sessionToken)) {
+    return {
+      sessionId: suppliedSessionId,
+      clientId,
+      clientKey,
+      authorized: true,
+      access: 'session_token',
+      resumed: false,
+    };
+  }
+
   if (clientId && clientKey) {
     const active = await resolveActiveSession(profileId, clientId, clientKey);
     if (active?.unauthorized) return { error: 'memory_client_unauthorized' };
@@ -186,15 +198,36 @@ export default async function handler(req, res) {
 
   if (memoryBlobConfigured() && access.authorized) {
     try {
+      const compatibility = await ensureLegacySessionCompatibility(profileId, sessionId);
       const snapshot = await getMemorySnapshot(profileId, sessionId);
+      let legacyCurrent = null;
+      if (!snapshot.current?.memory) {
+        legacyCurrent = await getLegacyCurrentMemory(profileId, sessionId);
+        if (legacyCurrent?.memory) {
+          snapshot.current = {
+            schema_version: 'legacy-v1-read-compat',
+            profile_id: profileId,
+            session_id: sessionId,
+            source_block_no: legacyCurrent.source_block_no,
+            memory: legacyCurrent.memory,
+            updated_at: legacyCurrent.updated_at,
+          };
+        }
+      }
       const [context, recall] = await Promise.all([
         getRuntimeMemoryContext(profileId, sessionId, snapshot),
         recallMemory(profileId, sessionId, payload.request_text, 3, snapshot.index),
       ]);
+      if (legacyCurrent?.memory) context.memory_source = 'legacy_v1_current';
       payload.memory_context = context.memory;
       payload.recent_turns = context.recent_turns;
       payload.recall_context = recall;
-      payload.storage_manifest = snapshot.manifest;
+      payload.storage_manifest = {
+        ...snapshot.manifest,
+        continuity_memory_available: !!context.memory,
+        continuity_memory_source: context.memory_source || 'none',
+        legacy_manifest_reconciled: compatibility?.reconciled === true,
+      };
       payload.memory_source = context.memory_source;
     } catch (error) {
       payload.memory_load_error = String(error?.message || error);
