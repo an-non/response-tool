@@ -1,4 +1,4 @@
-name: Apply legacy continuity compatibility fix
+name: One-rally Yuki continuity check
 
 on:
   push:
@@ -6,77 +6,66 @@ on:
       - blob-connectivity-probe-20260812
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 4
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Patch compatibility paths
+      - name: Send exactly one relay turn to an existing session
         shell: bash
+        env:
+          BASE_URL: https://response-tool.vercel.app
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          from pathlib import Path
+          import base64, json, os, time, urllib.parse, urllib.request, urllib.error
 
-          def replace_once(path, old, new):
-              p=Path(path)
-              text=p.read_text()
-              if old not in text:
-                  raise SystemExit(f'expected snippet not found in {path}: {old[:100]!r}')
-              if text.count(old) != 1:
-                  raise SystemExit(f'expected exactly one snippet in {path}, got {text.count(old)}')
-              p.write_text(text.replace(old,new,1))
+          base=os.environ['BASE_URL']
+          profile='natural-memory-probe-31892023845-1'
+          session='session-31892023845-1'
+          client_id='client-31892023845-1'
+          client_key='key-31892023845-1-isolated'
+          prompt='前に話した基準語AとB、判断基準を短く教えて。説明は一文で。'
 
-          # Relay: use legacy manifest repair and V1 current memory only as read compatibility.
-          replace_once('api/relay.js',
-          "import { MEMORY_BLOCK_SIZE, MEMORY_SCHEMA } from '../src/config.js';\n",
-          "import { MEMORY_BLOCK_SIZE, MEMORY_SCHEMA } from '../src/config.js';\nimport { ensureLegacySessionCompatibility, getLegacyCurrentMemory } from '../src/legacy-memory-compat.js';\n")
-
-          replace_once('api/relay.js',
-          "  const sessionToken = String(payload?.session_token || '');\n\n  if (clientId && clientKey) {",
-          "  const sessionToken = String(payload?.session_token || '');\n\n  if (sessionToken && verifyConversationToken(profileId, suppliedSessionId, sessionToken)) {\n    return {\n      sessionId: suppliedSessionId,\n      clientId,\n      clientKey,\n      authorized: true,\n      access: 'session_token',\n      resumed: false,\n    };\n  }\n\n  if (clientId && clientKey) {")
-
-          replace_once('api/relay.js',
-          "  const sessionId = access.sessionId;\n  payload.session_id = sessionId;\n  payload.yuki_context = { ...(payload.yuki_context || {}), session_id: sessionId };\n\n  if (memoryBlobConfigured() && access.authorized) {\n    try {\n      const snapshot = await getMemorySnapshot(profileId, sessionId);\n      const [context, recall] = await Promise.all([\n        getRuntimeMemoryContext(profileId, sessionId, snapshot),\n        recallMemory(profileId, sessionId, payload.request_text, 3, snapshot.index),\n      ]);\n      payload.memory_context = context.memory;\n      payload.recent_turns = context.recent_turns;\n      payload.recall_context = recall;\n      payload.storage_manifest = snapshot.manifest;\n      payload.memory_source = context.memory_source;",
-          "  const sessionId = access.sessionId;\n  payload.session_id = sessionId;\n  payload.yuki_context = { ...(payload.yuki_context || {}), session_id: sessionId };\n\n  if (memoryBlobConfigured() && access.authorized) {\n    try {\n      const compatibility = await ensureLegacySessionCompatibility(profileId, sessionId);\n      const snapshot = await getMemorySnapshot(profileId, sessionId);\n      let legacyCurrent = null;\n      if (!snapshot.current?.memory) {\n        legacyCurrent = await getLegacyCurrentMemory(profileId, sessionId);\n        if (legacyCurrent?.memory) {\n          snapshot.current = {\n            schema_version: 'legacy-v1-read-compat',\n            profile_id: profileId,\n            session_id: sessionId,\n            source_block_no: legacyCurrent.source_block_no,\n            memory: legacyCurrent.memory,\n            updated_at: legacyCurrent.updated_at,\n          };\n        }\n      }\n      const [context, recall] = await Promise.all([\n        getRuntimeMemoryContext(profileId, sessionId, snapshot),\n        recallMemory(profileId, sessionId, payload.request_text, 3, snapshot.index),\n      ]);\n      if (legacyCurrent?.memory) context.memory_source = 'legacy_v1_current';\n      payload.memory_context = context.memory;\n      payload.recent_turns = context.recent_turns;\n      payload.recall_context = recall;\n      payload.storage_manifest = {\n        ...snapshot.manifest,\n        continuity_memory_available: !!context.memory,\n        continuity_memory_source: context.memory_source || 'none',\n        legacy_manifest_reconciled: compatibility?.reconciled === true,\n      };\n      payload.memory_source = context.memory_source;")
-
-          # History: repair stale/legacy session manifest before deriving turn_count/history.
-          replace_once('api/history.js',
-          "import { conversationToken, verifyConversationToken } from '../src/conversation-auth.js';\n",
-          "import { conversationToken, verifyConversationToken } from '../src/conversation-auth.js';\nimport { ensureLegacySessionCompatibility } from '../src/legacy-memory-compat.js';\n")
-
-          replace_once('api/history.js',
-          "async function responseForSession(req, res, profile, session, updatedAt = null) {\n  const includeMemory = String(req.query?.include_memory || '') === '1';",
-          "async function responseForSession(req, res, profile, session, updatedAt = null) {\n  await ensureLegacySessionCompatibility(profile, session);\n  const includeMemory = String(req.query?.include_memory || '') === '1';")
-
-          replace_once('api/history.js',
-          "    const session = String(req.query?.session_id || '');\n    const token = String(req.query?.token || '');\n    if (session && token) {\n      if (!verifyConversationToken(profile, session, token)) return json(res, 401, { ok: false, error: 'unauthorized' });\n      return responseForSession(req, res, profile, session);\n    }\n    const clientId = String(req.query?.client_id || '');\n    const clientKey = String(req.query?.client_key || '');",
-          "    const session = String(req.query?.session_id || '');\n    const token = String(req.query?.token || '');\n    const clientId = String(req.query?.client_id || '');\n    const clientKey = String(req.query?.client_key || '');\n    if (session && token && verifyConversationToken(profile, session, token)) {\n      return responseForSession(req, res, profile, session);\n    }\n    if (session && token && (!clientId || !clientKey)) {\n      return json(res, 401, { ok: false, error: 'unauthorized' });\n    }")
-
-          # Browser: relay the fresh conversation token obtained during resume / prior turns.
-          replace_once('index.html',
-          "const payload={schema_version:'1.3',request_id:'web_'+Date.now(),request_text:current,session_id:sessionId,client_id:clientId,client_key:clientKey,client_recent_turns:recentPairs(),",
-          "const payload={schema_version:'1.3',request_id:'web_'+Date.now(),request_text:current,session_id:sessionId,session_token:sessionStorage.getItem('yuki_session_token')||'',client_id:clientId,client_key:clientKey,client_recent_turns:recentPairs(),")
-
-          print('patched files: api/relay.js api/history.js index.html')
+          payload={
+            'schema_version':'1.3','request_id':'one_rally_continuity_check','request_text':prompt,
+            'session_id':session,'client_id':client_id,'client_key':client_key,'client_recent_turns':[],
+            'yuki_state':{'intent':'neutral','consent':'neutral','initiative':'neutral','affection':'neutral','arousal_context':'none','plain_language':''},
+            'yuki_context':{'profile_id':profile,'session_id':session,'persona':{'autonomy':'independent'},'consent_profile':{'revocable':True,'current_permissions':[]},'relationship':{'established':False,'mode':None}},
+            'state_transition':{'action':'preserve','reason':'one_rally_continuity_check'},
+            'rendering':{'language':'ja','max_output_tokens':160,'output_format':'text'}
+          }
+          raw=json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode()
+          p=base64.urlsafe_b64encode(raw).decode().rstrip('=')
+          url=base+'/api/relay?p='+urllib.parse.quote(p,safe='')
+          req=urllib.request.Request(url,headers={'User-Agent':'response-tool-one-rally-check/1.0'})
+          started=time.monotonic()
+          try:
+            with urllib.request.urlopen(req,timeout=90) as r:
+              status=r.status; body=json.loads(r.read().decode())
+          except urllib.error.HTTPError as e:
+            status=e.code; body=json.loads(e.read().decode('utf-8','replace'))
+          elapsed=time.monotonic()-started
+          print('HTTP',status)
+          print('LATENCY',round(elapsed,3))
+          print('USER',prompt)
+          print('YUKI',body.get('text',''))
+          print('MEMORY',json.dumps(body.get('memory') or {},ensure_ascii=False))
+          if status != 200 or body.get('ok') is not True:
+            raise SystemExit('relay failed: '+json.dumps(body,ensure_ascii=False))
+          mem=body.get('memory') or {}
+          manifest=mem.get('manifest') or {}
+          if mem.get('session_id') != session:
+            raise SystemExit('session mismatch')
+          if int(manifest.get('turn_count') or 0) < 11:
+            raise SystemExit('existing history not loaded')
+          if mem.get('source') not in ('current','legacy_v1_current','latest_ready_block_fallback','latest_degraded_block_fallback'):
+            raise SystemExit('continuity memory not loaded')
+          text=body.get('text','')
+          expected=('琥珀の鍵','銀の方位磁針','推測より実測')
+          if not all(value in text for value in expected):
+            raise SystemExit('Yuki did not recall expected continuity facts')
+          print('ONE_RALLY_OK=true')
           PY
-
-          git diff --check
-          git diff -- api/relay.js api/history.js index.html
-
-      - name: Commit to main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "response-tool-maintenance"
-          git config user.email "response-tool-maintenance@users.noreply.github.com"
-          git add api/relay.js api/history.js index.html
-          git commit -m "Restore legacy Yuki continuity reads"
-          git push origin HEAD:main
