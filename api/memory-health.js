@@ -8,10 +8,13 @@ const json=(res,status,body)=>{res.status(status).setHeader('Content-Type','appl
 export default async function handler(req,res){
   if(req.method!=='GET')return json(res,405,{ok:false,error:'method_not_allowed'});
 
-  const blob=await memoryBlobHealth();
-  let neon={configured:neonConfigured(),ok:false,provider:'neon_postgres',probe:false};
+  const probeRequested=String(req.query?.probe||'')==='neon';
+  let neon={configured:neonConfigured(),ok:false,provider:'neon_postgres',probe:probeRequested};
 
-  if(neon.configured&&String(req.query?.probe||'')==='neon'){
+  if(probeRequested){
+    if(!neon.configured){
+      return json(res,503,{ok:false,memory:{skipped:true,reason:'neon_probe_only'},neon:{...neon,error:'neon_database_url_missing'},compression_block_size:MEMORY_BLOCK_SIZE,memory_schema:MEMORY_SCHEMA,authority:'derived_context_only'});
+    }
     const probeId=`probe_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     try{
       await ensureProbeSchema();
@@ -29,15 +32,16 @@ export default async function handler(req,res){
         retained_probe_rows:0,
         blob_touched_by_neon_probe:false,
       };
+      return json(res,neon.ok?200:500,{ok:neon.ok,memory:{skipped:true,reason:'neon_probe_only'},neon,compression_block_size:MEMORY_BLOCK_SIZE,memory_schema:MEMORY_SCHEMA,authority:'derived_context_only'});
     }catch(error){
       neon={configured:true,ok:false,provider:'neon_postgres',probe:true,error:String(error?.message||error),blob_touched_by_neon_probe:false};
+      return json(res,502,{ok:false,memory:{skipped:true,reason:'neon_probe_only'},neon,compression_block_size:MEMORY_BLOCK_SIZE,memory_schema:MEMORY_SCHEMA,authority:'derived_context_only'});
     }
   }
 
-  const probeRequested=String(req.query?.probe||'')==='neon';
-  const ok=probeRequested?neon.ok:blob.ok;
-  return json(res,ok?200:503,{
-    ok,
+  const blob=await memoryBlobHealth();
+  return json(res,blob.ok?200:503,{
+    ok:blob.ok,
     memory:blob,
     neon,
     compression_block_size:MEMORY_BLOCK_SIZE,
