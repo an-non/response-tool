@@ -10,7 +10,7 @@ import {
   readSessionManifest,
   saveMemoryBlock,
   saveMemoryState,
-} from './conversation-blob.js';
+} from './conversation-store.js';
 
 export const MEMORY_MODEL = process.env.GROQ_MEMORY_MODEL || 'openai/gpt-oss-20b';
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
@@ -707,4 +707,3 @@ export async function recallMemory(profileId, sessionId, query, maxBlocks = 3, s
     matches: finalMatches,
   };
 }
-
