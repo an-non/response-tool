@@ -108,6 +108,8 @@ async function resolveMemorySession(payload, profileId) {
   if (sessionToken && verifyConversationToken(profileId, suppliedSessionId, sessionToken)) {
     return {
       sessionId: suppliedSessionId,
+      previousSessionId: null,
+      sessionStart: false,
       clientId,
       clientKey,
       authorized: true,
@@ -119,21 +121,40 @@ async function resolveMemorySession(payload, profileId) {
   if (clientId && clientKey) {
     const active = await resolveActiveSession(profileId, clientId, clientKey);
     if (active?.unauthorized) return { error: 'memory_client_unauthorized' };
+
+    const supplied = await readSessionManifest(profileId, suppliedSessionId);
     if (active?.session_id) {
+      const activeSessionId = String(active.session_id);
+      if (activeSessionId === suppliedSessionId) {
+        return {
+          sessionId: suppliedSessionId,
+          previousSessionId: null,
+          sessionStart: false,
+          clientId,
+          clientKey,
+          authorized: true,
+          access: 'client_active_session',
+          resumed: false,
+        };
+      }
+      if (supplied.turn_count > 0) return { error: 'memory_session_unauthorized' };
       return {
-        sessionId: String(active.session_id),
+        sessionId: suppliedSessionId,
+        previousSessionId: activeSessionId,
+        sessionStart: true,
         clientId,
         clientKey,
         authorized: true,
-        access: 'client_active_session',
-        resumed: String(active.session_id) !== suppliedSessionId,
+        access: 'new_client_session',
+        resumed: false,
       };
     }
 
-    const supplied = await readSessionManifest(profileId, suppliedSessionId);
     if (supplied.turn_count > 0) return { error: 'memory_session_unauthorized' };
     return {
       sessionId: suppliedSessionId,
+      previousSessionId: null,
+      sessionStart: true,
       clientId,
       clientKey,
       authorized: true,
@@ -148,6 +169,8 @@ async function resolveMemorySession(payload, profileId) {
     }
     return {
       sessionId: suppliedSessionId,
+      previousSessionId: null,
+      sessionStart: false,
       clientId: '',
       clientKey: '',
       authorized: true,
@@ -160,6 +183,8 @@ async function resolveMemorySession(payload, profileId) {
   if (supplied.turn_count > 0) return { error: 'memory_credentials_required' };
   return {
     sessionId: suppliedSessionId,
+    previousSessionId: null,
+    sessionStart: true,
     clientId: '',
     clientKey: '',
     authorized: true,
@@ -183,6 +208,8 @@ export default async function handler(req, res) {
     ? await resolveMemorySession(payload, profileId)
     : {
         sessionId: String(payload?.session_id || payload?.yuki_context?.session_id || 'default'),
+        previousSessionId: null,
+        sessionStart: false,
         clientId: String(payload?.client_id || ''),
         clientKey: String(payload?.client_key || ''),
         authorized: true,
@@ -214,21 +241,63 @@ export default async function handler(req, res) {
           };
         }
       }
-      const [context, recall] = await Promise.all([
+      const [currentContext, currentRecall] = await Promise.all([
         getRuntimeMemoryContext(profileId, sessionId, snapshot),
         recallMemory(profileId, sessionId, payload.request_text, 3, snapshot.index),
       ]);
-      if (legacyCurrent?.memory) context.memory_source = 'legacy_v1_current';
+      if (legacyCurrent?.memory) currentContext.memory_source = 'legacy_v1_current';
+
+      let context = currentContext;
+      let recall = currentRecall;
+      let previousSessionLoaded = false;
+      let previousSessionMemorySource = 'none';
+
+      if (access.sessionStart && access.previousSessionId && Number(snapshot.manifest?.turn_count || 0) === 0) {
+        const previousSessionId = String(access.previousSessionId);
+        await ensureLegacySessionCompatibility(profileId, previousSessionId);
+        const previousSnapshot = await getMemorySnapshot(profileId, previousSessionId);
+        let previousLegacyCurrent = null;
+        if (!previousSnapshot.current?.memory) {
+          previousLegacyCurrent = await getLegacyCurrentMemory(profileId, previousSessionId);
+          if (previousLegacyCurrent?.memory) {
+            previousSnapshot.current = {
+              schema_version: 'legacy-v1-read-compat',
+              profile_id: profileId,
+              session_id: previousSessionId,
+              source_block_no: previousLegacyCurrent.source_block_no,
+              memory: previousLegacyCurrent.memory,
+              updated_at: previousLegacyCurrent.updated_at,
+            };
+          }
+        }
+        const [previousContext, previousRecall] = await Promise.all([
+          getRuntimeMemoryContext(profileId, previousSessionId, previousSnapshot),
+          recallMemory(profileId, previousSessionId, payload.request_text, 3, previousSnapshot.index),
+        ]);
+        if (previousLegacyCurrent?.memory) previousContext.memory_source = 'legacy_v1_current';
+        context = previousContext;
+        recall = previousRecall;
+        previousSessionLoaded = true;
+        previousSessionMemorySource = previousContext.memory_source || 'none';
+      }
+
       payload.memory_context = context.memory;
       payload.recent_turns = context.recent_turns;
       payload.recall_context = recall;
+      payload.previous_session_id = previousSessionLoaded ? String(access.previousSessionId) : null;
+      payload.previous_session_loaded = previousSessionLoaded;
       payload.storage_manifest = {
         ...snapshot.manifest,
-        continuity_memory_available: !!context.memory,
-        continuity_memory_source: context.memory_source || 'none',
+        continuity_memory_available: !!currentContext.memory,
+        continuity_memory_source: currentContext.memory_source || 'none',
         legacy_manifest_reconciled: compatibility?.reconciled === true,
+        previous_session_loaded: previousSessionLoaded,
+        previous_session_id: previousSessionLoaded ? String(access.previousSessionId) : null,
+        previous_session_memory_available: previousSessionLoaded ? !!context.memory : false,
+        previous_session_memory_source: previousSessionMemorySource,
+        previous_session_recent_turns_loaded: previousSessionLoaded ? array(context.recent_turns).length : 0,
       };
-      payload.memory_source = context.memory_source;
+      payload.memory_source = previousSessionLoaded ? 'previous_session' : currentContext.memory_source;
     } catch (error) {
       payload.memory_load_error = String(error?.message || error);
       console.error(JSON.stringify({
@@ -253,6 +322,9 @@ export default async function handler(req, res) {
           blob_configured: memoryBlobConfigured(),
           session_id: sessionId,
           session_token: conversationToken(profileId, sessionId),
+          session_start: access.sessionStart === true,
+          previous_session_id: payload.previous_session_id || null,
+          previous_session_loaded: payload.previous_session_loaded === true,
           block_size: MEMORY_BLOCK_SIZE,
           memory_schema: MEMORY_SCHEMA,
           memory_model: MEMORY_MODEL,
