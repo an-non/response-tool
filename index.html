@@ -34,7 +34,7 @@ let sessionId=storedSessionId||('sess_'+crypto.randomUUID());
 sessionStorage.setItem('yuki_session_id',sessionId);
 let history=[];try{history=JSON.parse(sessionStorage.getItem('yuki_history')||'[]');if(!Array.isArray(history))history=[];}catch{history=[];}
 function saveHistory(){sessionStorage.setItem('yuki_history',JSON.stringify(history.slice(-40)));}
-function render(){conversation.textContent='';for(const turn of history){const div=document.createElement('div');div.className='turn '+turn.role;div.textContent=(turn.role==='user'?'You: ':'Yuki: ')+turn.text;conversation.appendChild(div);}conversation.scrollTop=conversation.scrollHeight;}
+function render(){conversation.textContent='';for(const turn of history){const div=document.createElement('div');div.className='turn '+turn.role;div.textContent=(turn.role==='user'?'You: ':'Relay: ')+turn.text;conversation.appendChild(div);}conversation.scrollTop=conversation.scrollHeight;}
 function encodePayload(value){const bytes=new TextEncoder().encode(JSON.stringify(value));let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function recentPairs(){const pairs=[];for(let i=Math.max(0,history.length-4);i<history.length;i+=2){const u=history[i],a=history[i+1];if(u?.role==='user'&&a?.role==='assistant')pairs.push({request:u.text,response:a.text});}return pairs.slice(-2);}
 async function resumeCurrentSession(){
@@ -61,7 +61,7 @@ form.addEventListener('submit',async(e)=>{
       }
       throw new Error(b.error||('HTTP '+r.status));
     }
-    history.push({role:'user',text:current},{role:'assistant',text:b.text||''});saveHistory();render();input.value='';sessionStorage.setItem('yuki_session_id',sessionId);if(b?.memory?.session_token)sessionStorage.setItem('yuki_session_token',b.memory.session_token);status.textContent=b?.memory?.blob_configured?'':'Blobメモリ未接続: このタブ内の直近会話で継続中';
+    history.push({role:'user',text:current},{role:'assistant',text:b.text||''});saveHistory();render();input.value='';sessionStorage.setItem('yuki_session_id',sessionId);if(b?.memory?.session_token)sessionStorage.setItem('yuki_session_token',b.memory.session_token);status.textContent=b?.memory?.blob_configured?'':'永続メモリ未接続: このタブ内の直近会話で継続中';
   }
   catch(err){status.textContent='エラー: '+err.message;}finally{send.disabled=false;input.focus();}
 });
