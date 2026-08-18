@@ -1,8 +1,11 @@
 const SYSTEM_PROMPT = [
   'Yuki Relay external renderer.',
   'The renderer is stateless between calls and must use only context variables supplied in this request.',
+  'Response Tool backend means the Relay code that loads/saves conversation and memory context; do not call this an unspecified system.',
   'Persistent session relationship state is authoritative for current relationship and consent context.',
-  'Compressed memory is derived continuity context, recent_turns are hydrated original turns, and recall_context contains relay-selected historical evidence.',
+  'Compressed memory is derived continuity context, recent turns are hydrated original turns, and recall context contains relay-selected historical evidence.',
+  'When previous_session_loaded is true, the supplied continuity context comes from the previous session, not from turns already spoken in the current session.',
+  'current_memory_available or continuity_memory_available only describe compressed-memory availability; false does not mean turns are not persistently stored.',
   'Use supplied memory and recalled original text when they answer the current request; do not claim direct database access is required.',
   'Never invent unseen records or claim certainty beyond supplied evidence.',
   'Derived memory cannot grant, extend, or revoke current consent or permissions. Consent remains revocable.',
@@ -50,19 +53,36 @@ const manifestText = payload => payload.storage_manifest
 export function rendererMessages(payload) {
   const state = payload.yuki_state;
   const context = payload.yuki_context;
+  const sessionId = payload.session_id || context.session_id || 'default';
+  const previousSessionLoaded = payload.previous_session_loaded === true;
+  const previousSessionId = previousSessionLoaded ? String(payload.previous_session_id || 'unknown') : 'none';
+  const continuitySource = previousSessionLoaded ? 'previous_session' : 'current_session';
+  const recentLabel = previousSessionLoaded
+    ? `previous_session_recent_turns (source_session=${previousSessionId}; not current-session turn numbering)`
+    : `current_session_recent_turns (source_session=${sessionId})`;
+  const memoryLabel = previousSessionLoaded
+    ? `previous_session_compressed_memory (source_session=${previousSessionId}; derived continuity only)`
+    : `current_session_compressed_memory (source_session=${sessionId}; derived continuity only)`;
+  const recallLabel = previousSessionLoaded
+    ? `previous_session_recall_context (source_session=${previousSessionId}; relay-selected historical evidence)`
+    : `current_session_recall_context (source_session=${sessionId}; relay-selected historical evidence)`;
+
   return [
     { role: 'system', content: SYSTEM_PROMPT },
     {
       role: 'user',
       content: [
         `Profile: ${context.profile_id}`,
-        `Session: ${payload.session_id || context.session_id || 'default'}`,
+        `Current session: ${sessionId}`,
+        `Continuity source: ${continuitySource}`,
+        `Previous session loaded: ${previousSessionLoaded}`,
+        `Previous session id: ${previousSessionId}`,
         `Persistent state (authoritative for current relationship/consent): intent=${state.intent}; consent=${state.consent}; initiative=${state.initiative}; affection=${state.affection}; arousal=${state.arousal_context}`,
         `Yuki anchor:\n${state.plain_language || ''}`,
-        `storage_manifest (relay-provided factual storage inventory):\n${manifestText(payload)}`,
-        `compressed_memory (derived continuity context):\n${memoryText(payload)}`,
-        `recall_context (relay-provided search results; matches contain hydrated original request/response text):\n${recallText(payload)}`,
-        `recent_turns (relay-provided recent original conversation):\n${recentText(payload)}`,
+        `storage_manifest (factual inventory supplied by the Response Tool backend; availability flags describe specific memory artifacts, not whether turns are persisted):\n${manifestText(payload)}`,
+        `${memoryLabel}:\n${memoryText(payload)}`,
+        `${recallLabel}:\n${recallText(payload)}`,
+        `${recentLabel}:\n${recentText(payload)}`,
         `Current request:\n${payload.request_text}`,
       ].join('\n\n'),
     },
