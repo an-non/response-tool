@@ -18,11 +18,16 @@ const SYSTEM_PROMPT = [
   'Follow provider rules.',
 ].join(' ');
 
-export const MODEL = 'qwen/qwen3.6-27b';
+export const DIALOGUE_MODEL = process.env.GROQ_DIALOGUE_MODEL || 'openai/gpt-oss-20b';
+export const MODEL = DIALOGUE_MODEL;
 export const GROQ = 'https://api.groq.com/openai/v1/chat/completions';
+
+const isGptOss = model => String(model || '').startsWith('openai/gpt-oss');
+
 export const GENERATION_PROFILE = Object.freeze({
-  reasoning_effort: 'none',
-  reasoning_format: 'hidden',
+  ...(isGptOss(MODEL)
+    ? { reasoning_effort: 'low' }
+    : { reasoning_effort: 'none', reasoning_format: 'hidden' }),
   temperature: 0.7,
   top_p: 0.8,
   response_format: { type: 'json_object' },
