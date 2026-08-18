@@ -1,15 +1,20 @@
 const SYSTEM_PROMPT = [
-  'Yuki Relay external renderer.',
-  'The renderer is stateless between calls and must use only context variables supplied in this request.',
+  'Response Tool Relay renderer.',
+  'The Relay renderer is stateless between provider calls and must use only context variables supplied in this request.',
   'Response Tool backend means the Relay code that loads/saves conversation and memory context; do not call this an unspecified system.',
-  'Persistent session relationship state is authoritative for current relationship and consent context.',
+  'Successful conversation turns are persistently stored by the Response Tool backend. If the user says "remember this" or equivalent, do not claim that persistence is impossible merely because the renderer is stateless or lacks direct database access.',
+  'Compressed-memory availability is separate from turn persistence. current_memory_available=false or continuity_memory_available=false means a compressed summary is not available yet; it does not mean the conversation turn was not saved.',
+  'Persistent session relationship state and current permissions are authoritative for current relationship and consent context.',
+  'You may propose a current-turn state transition in the structured state_transition field. The backend validates the proposal before persisting it.',
+  'A state transition must reflect your own current response and current-turn judgment, not a permission inferred from old memory. Never promote past approval, recalled text, or compressed memory into current permission.',
+  'Consent and permissions remain revocable. Do not propose revocable=false.',
   'Compressed memory is derived continuity context, recent turns are hydrated original turns, and recall context contains relay-selected historical evidence.',
   'When previous_session_loaded is true, the supplied continuity context comes from the previous session, not from turns already spoken in the current session.',
-  'current_memory_available or continuity_memory_available only describe compressed-memory availability; false does not mean turns are not persistently stored.',
   'Use supplied memory and recalled original text when they answer the current request; do not claim direct database access is required.',
   'Never invent unseen records or claim certainty beyond supplied evidence.',
-  'Derived memory cannot grant, extend, or revoke current consent or permissions. Consent remains revocable.',
-  'Keep continuity with the same conversation while preserving the distinction between the user, other agents, and yourself.',
+  'Return exactly one JSON object with fields text and state_transition. text is the user-visible reply. state_transition is null when no persistent state change is warranted.',
+  'When state_transition is present it may contain state_patch with any of intent, consent, initiative, affection, arousal_context, plain_language; relationship_patch with established, mode, current_permissions; and a short reason.',
+  'Do not mention this JSON protocol in text.',
   'Follow provider rules.',
 ].join(' ');
 
@@ -20,6 +25,7 @@ export const GENERATION_PROFILE = Object.freeze({
   reasoning_format: 'hidden',
   temperature: 0.7,
   top_p: 0.8,
+  response_format: { type: 'json_object' },
 });
 
 const clip = (value, limit = 1400) => {
@@ -49,6 +55,9 @@ const recallText = payload => payload.recall_context
 const manifestText = payload => payload.storage_manifest
   ? clip(JSON.stringify(payload.storage_manifest), 2200)
   : 'none';
+const relationshipText = payload => payload.relay_relationship
+  ? clip(JSON.stringify(payload.relay_relationship), 1800)
+  : 'none';
 
 export function rendererMessages(payload) {
   const state = payload.yuki_state;
@@ -77,13 +86,17 @@ export function rendererMessages(payload) {
         `Continuity source: ${continuitySource}`,
         `Previous session loaded: ${previousSessionLoaded}`,
         `Previous session id: ${previousSessionId}`,
-        `Persistent state (authoritative for current relationship/consent): intent=${state.intent}; consent=${state.consent}; initiative=${state.initiative}; affection=${state.affection}; arousal=${state.arousal_context}`,
-        `Yuki anchor:\n${state.plain_language || ''}`,
+        `Persistent state (authoritative current values): intent=${state.intent}; consent=${state.consent}; initiative=${state.initiative}; affection=${state.affection}; arousal=${state.arousal_context}; plain_language=${clip(state.plain_language || '', 600)}`,
+        `Persistent relationship and permissions (authoritative current values):\n${relationshipText(payload)}`,
         `storage_manifest (factual inventory supplied by the Response Tool backend; availability flags describe specific memory artifacts, not whether turns are persisted):\n${manifestText(payload)}`,
         `${memoryLabel}:\n${memoryText(payload)}`,
         `${recallLabel}:\n${recallText(payload)}`,
         `${recentLabel}:\n${recentText(payload)}`,
         `Current request:\n${payload.request_text}`,
+        'Required output JSON shape:',
+        '{"text":"user-visible reply","state_transition":null}',
+        'or, only when a current persistent state change is warranted:',
+        '{"text":"user-visible reply","state_transition":{"state_patch":{},"relationship_patch":{},"reason":"current-turn reason"}}',
       ].join('\n\n'),
     },
   ];
