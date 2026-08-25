@@ -44,23 +44,12 @@ export function oxMemorySql() {
 
 export function oxMemoryStorageInfo() {
   const { url, source } = connectionInfo();
-  const visibleOxDbEnvNames = Object.keys(process.env)
-    .filter(key => /^OX_/i.test(key))
-    .filter(key => /(DATABASE|POSTGRES|NEON|PGHOST|PGUSER|PGDATABASE)/i.test(key))
-    .sort();
   return {
     configured: !!url,
     provider: 'neon_postgres',
     isolated_from_yuki: true,
     expected_env: 'OX_MEMORY_DATABASE_URL',
     env_source: source,
-    compatibility_envs: [
-      'OX_MEMORY_DATABASE_URL_URL',
-      'OX_MEMORY_DATABASE_URL_DATABASE_URL',
-      'OX_MEMORY_DATABASE_URL_POSTGRES_URL',
-      'OX_MEMORY_DATABASE_URL_NEON_DATABASE_URL',
-      'OX_MEMORY_POSTGRES_URL',
-    ],
-    visible_ox_database_env_names: visibleOxDbEnvNames,
+    compatibility_mode: source && source !== 'OX_MEMORY_DATABASE_URL' ? 'prefixed_marketplace_env' : 'canonical',
   };
 }
