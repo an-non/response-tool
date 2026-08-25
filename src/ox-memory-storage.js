@@ -1,14 +1,35 @@
 import { neon } from '@neondatabase/serverless';
 
-function connectionInfo() {
-  const candidates = [
+const looksLikePostgresUrl = value => /^postgres(?:ql)?:\/\//i.test(String(value || '').trim());
+
+function explicitCandidates() {
+  return [
     ['OX_MEMORY_DATABASE_URL', process.env.OX_MEMORY_DATABASE_URL],
     ['OX_MEMORY_DATABASE_URL_URL', process.env.OX_MEMORY_DATABASE_URL_URL],
+    ['OX_MEMORY_DATABASE_URL_DATABASE_URL', process.env.OX_MEMORY_DATABASE_URL_DATABASE_URL],
+    ['OX_MEMORY_DATABASE_URL_POSTGRES_URL', process.env.OX_MEMORY_DATABASE_URL_POSTGRES_URL],
+    ['OX_MEMORY_DATABASE_URL_NEON_DATABASE_URL', process.env.OX_MEMORY_DATABASE_URL_NEON_DATABASE_URL],
     ['OX_MEMORY_POSTGRES_URL', process.env.OX_MEMORY_POSTGRES_URL],
   ];
-  const found = candidates.find(([, value]) => String(value || '').trim());
-  if (!found) return { url: null, source: null };
-  return { url: String(found[1]).trim(), source: found[0] };
+}
+
+function discoveredCandidates() {
+  return Object.keys(process.env)
+    .filter(key => /^OX_/i.test(key))
+    .filter(key => /(DATABASE|POSTGRES|NEON).*(URL|URI)|(?:URL|URI).*(DATABASE|POSTGRES|NEON)/i.test(key))
+    .map(key => [key, process.env[key]])
+    .filter(([, value]) => looksLikePostgresUrl(value));
+}
+
+function connectionInfo() {
+  const candidates = [...explicitCandidates(), ...discoveredCandidates()];
+  const seen = new Set();
+  for (const [name, value] of candidates) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (looksLikePostgresUrl(value)) return { url: String(value).trim(), source: name };
+  }
+  return { url: null, source: null };
 }
 
 export function oxMemoryConfigured() {
@@ -23,12 +44,23 @@ export function oxMemorySql() {
 
 export function oxMemoryStorageInfo() {
   const { url, source } = connectionInfo();
+  const visibleOxDbEnvNames = Object.keys(process.env)
+    .filter(key => /^OX_/i.test(key))
+    .filter(key => /(DATABASE|POSTGRES|NEON|PGHOST|PGUSER|PGDATABASE)/i.test(key))
+    .sort();
   return {
     configured: !!url,
     provider: 'neon_postgres',
     isolated_from_yuki: true,
     expected_env: 'OX_MEMORY_DATABASE_URL',
     env_source: source,
-    compatibility_envs: ['OX_MEMORY_DATABASE_URL_URL', 'OX_MEMORY_POSTGRES_URL'],
+    compatibility_envs: [
+      'OX_MEMORY_DATABASE_URL_URL',
+      'OX_MEMORY_DATABASE_URL_DATABASE_URL',
+      'OX_MEMORY_DATABASE_URL_POSTGRES_URL',
+      'OX_MEMORY_DATABASE_URL_NEON_DATABASE_URL',
+      'OX_MEMORY_POSTGRES_URL',
+    ],
+    visible_ox_database_env_names: visibleOxDbEnvNames,
   };
 }
