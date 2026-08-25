@@ -3,55 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Venice Chat | Response Tool</title>
-  <style>
-    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;background:#f6f7f8}
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;padding:22px}main{width:min(880px,100%);margin:0 auto;background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.06)}
-    header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap}h1{font-size:20px;margin:0}.sub{font-size:12px;color:#666;margin-top:3px}.back,.secondary{display:inline-flex;align-items:center;text-decoration:none;color:#222;border:1px solid #ccc;border-radius:9px;padding:8px 10px;background:#fff;font:inherit;cursor:pointer}
-    #health{font-size:12px;line-height:1.5;padding:9px 11px;border:1px solid #ddd;border-radius:10px;background:#fafafa;margin-bottom:14px}.health-ok{color:#146c2e}.health-bad{color:#a11}
-    #conversation{display:grid;gap:12px;margin:12px 0 18px;max-height:56vh;overflow:auto}.turn{white-space:pre-wrap;line-height:1.6;padding:12px 14px;border-radius:12px;background:#f5f5f5}.assistant{background:#eef1f4}.meta{font-size:11px;color:#777;margin-top:7px}.file-chip{font-size:12px;border:1px solid #ccc;border-radius:999px;padding:5px 8px;background:#fff}.file-chip button{border:0;background:transparent;padding:0 0 0 5px;color:#777;cursor:pointer}
-    textarea{width:100%;min-height:110px;resize:vertical;border:1px solid #bbb;border-radius:10px;padding:14px;font:inherit;line-height:1.5}.controls{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}.primary{border:0;border-radius:10px;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer;background:#111;color:#fff}.primary:disabled,.secondary:disabled{opacity:.5;cursor:default}.attach{display:inline-flex;align-items:center;gap:6px;border:1px solid #ccc;border-radius:10px;padding:9px 11px;cursor:pointer;background:#fff}.attach input{display:none}#pending{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}#status{margin-top:10px;font-size:13px;color:#666}.note{font-size:12px;color:#777;margin:10px 0 0;line-height:1.5}.error{color:#a11}
-  </style>
+  <meta http-equiv="refresh" content="0; url=/ox-alpha/" />
+  <title>Ox Alpha Chatへ移動</title>
 </head>
 <body>
-<main>
-  <header>
-    <div><h1>Venice Chat</h1><div class="sub">Response Tool / isolated Venice session</div></div>
-    <div style="display:flex;gap:8px"><button class="secondary" id="newChat" type="button">新しい会話</button><a class="back" href="/">← Response Tool</a></div>
-  </header>
-  <div id="health">Venice実行環境を確認中…</div>
-  <div id="conversation" aria-live="polite"></div>
-  <form id="form">
-    <textarea id="input" aria-label="入力" placeholder="メッセージを入力。画像やファイルも添付できます。"></textarea>
-    <div id="pending"></div>
-    <div class="controls">
-      <label class="attach">＋ 添付<input id="files" type="file" multiple /></label>
-      <button class="primary" id="send" type="submit">送信</button>
-    </div>
-  </form>
-  <div id="status" aria-live="polite"></div>
-  <p class="note">添付は1回の送信につき最大4件、合計2.5 MiBまで。添付内容はそのターンだけVeniceへ渡し、後続ターンの履歴にはファイル名だけ残します。</p>
-</main>
-<script>
-const form=document.getElementById('form'),input=document.getElementById('input'),send=document.getElementById('send'),status=document.getElementById('status'),conversation=document.getElementById('conversation'),fileInput=document.getElementById('files'),pending=document.getElementById('pending'),newChat=document.getElementById('newChat'),health=document.getElementById('health');
-const profileId='venice-default',MAX_FILES=4,MAX_TOTAL=2621440;
-function randomKey(){const bytes=crypto.getRandomValues(new Uint8Array(32));let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-const clientId=localStorage.getItem('venice_client_id')||('venice_client_'+crypto.randomUUID());localStorage.setItem('venice_client_id',clientId);
-const clientKey=localStorage.getItem('venice_client_key')||randomKey();localStorage.setItem('venice_client_key',clientKey);
-let sessionId=sessionStorage.getItem('venice_session_id')||('venice_'+crypto.randomUUID());sessionStorage.setItem('venice_session_id',sessionId);
-let history=[];try{history=JSON.parse(sessionStorage.getItem('venice_history')||'[]');if(!Array.isArray(history))history=[];}catch{history=[];}
-let selected=[];
-function saveHistory(){sessionStorage.setItem('venice_history',JSON.stringify(history.slice(-60)));}
-function render(){conversation.textContent='';if(!history.length){const d=document.createElement('div');d.className='turn assistant';d.textContent='Venice専用チャットです。メッセージ、画像、PDF・Office・CSV・テキスト・コード等を添付して送信できます。';conversation.appendChild(d);return;}for(const turn of history){const div=document.createElement('div');div.className='turn '+turn.role;div.textContent=(turn.role==='user'?'You: ':'Venice: ')+(turn.text||'');if(Array.isArray(turn.attachments)&&turn.attachments.length){const meta=document.createElement('div');meta.className='meta';meta.textContent='添付: '+turn.attachments.join(', ');div.appendChild(meta);}conversation.appendChild(div);}conversation.scrollTop=conversation.scrollHeight;}
-function renderPending(){pending.textContent='';for(const [i,file] of selected.entries()){const chip=document.createElement('span');chip.className='file-chip';chip.append(document.createTextNode(`${file.name} (${Math.ceil(file.size/1024)} KB)`));const x=document.createElement('button');x.type='button';x.textContent='×';x.onclick=()=>{selected.splice(i,1);renderPending();};chip.appendChild(x);pending.appendChild(chip);}}
-function fileToDataURL(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result||''));r.onerror=()=>reject(r.error||new Error('file_read_failed'));r.readAsDataURL(file);});}
-function validateFiles(list){const next=[...selected,...list];if(next.length>MAX_FILES)throw new Error(`添付は最大${MAX_FILES}件です。`);const total=next.reduce((sum,f)=>sum+f.size,0);if(total>MAX_TOTAL)throw new Error('添付ファイルの合計は2.5 MiB以下にしてください。');return next;}
-fileInput.addEventListener('change',()=>{try{selected=validateFiles([...fileInput.files]);renderPending();status.textContent='';}catch(e){status.textContent=e.message;status.className='error';}finally{fileInput.value='';}});
-async function checkHealth(){try{const r=await fetch('/api/architecture?mode=venice-health',{cache:'no-store'}),b=await r.json();if(!r.ok||!b.ok)throw new Error(b.error||('HTTP '+r.status));health.className=b.api_key_configured?'health-ok':'health-bad';health.textContent=`Venice APIキー: ${b.api_key_configured?'認識済み':'未認識'} / 環境: ${b.environment||'unknown'} / ブランチ: ${b.branch||'unknown'} / model: ${b.model||'-'}`;}catch(e){health.className='health-bad';health.textContent='Venice実行環境の確認に失敗: '+e.message;}}
-async function restore(){const token=sessionStorage.getItem('venice_session_token')||'';if(!token||history.length)return;try{const u='/api/history?'+new URLSearchParams({profile_id:profileId,session_id:sessionId,token,limit:'30'});const r=await fetch(u),b=await r.json();if(!r.ok||!b.ok)return;history=[];for(const t of b.turns||[]){history.push({role:'user',text:t.request_text||t.request||''},{role:'assistant',text:t.response_text||t.response||''});}saveHistory();render();if(history.length)status.textContent='このVeniceセッションを復元しました。';}catch{}}
-newChat.addEventListener('click',()=>{sessionId='venice_'+crypto.randomUUID();sessionStorage.setItem('venice_session_id',sessionId);sessionStorage.removeItem('venice_session_token');history=[];selected=[];saveHistory();renderPending();render();status.textContent='新しいVenice会話を開始しました。';input.focus();});
-form.addEventListener('submit',async e=>{e.preventDefault();const text=input.value.trim();if(!text&&!selected.length)return;send.disabled=true;newChat.disabled=true;status.className='';status.textContent='送信中…';try{const attachments=await Promise.all(selected.map(async file=>({name:file.name,type:file.type||'application/octet-stream',data:await fileToDataURL(file)})));const payload={request_id:'venice_web_'+Date.now(),request_text:text,session_id:sessionId,session_token:sessionStorage.getItem('venice_session_token')||'',client_id:clientId,client_key:clientKey,max_output_tokens:1800,attachments};const r=await fetch('/api/architecture?mode=venice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const b=await r.json().catch(()=>({}));if(!r.ok||!b.ok){if(r.status===429)throw new Error('Veniceのレート上限です。時間を置いて再試行してください。');throw new Error(b.detail||b.error||('HTTP '+r.status));}history.push({role:'user',text:text||'添付された内容を確認してください。',attachments:selected.map(f=>f.name)},{role:'assistant',text:b.text||''});saveHistory();render();input.value='';selected=[];renderPending();if(b?.session?.session_token)sessionStorage.setItem('venice_session_token',b.session.session_token);if(b?.session?.session_id){sessionId=b.session.session_id;sessionStorage.setItem('venice_session_id',sessionId);}status.textContent=`${b.provider||'venice'} / ${b.model||'model'} / turn ${b?.session?.turn_no||'-'}`;}catch(err){status.className='error';status.textContent='エラー: '+err.message;}finally{send.disabled=false;newChat.disabled=false;input.focus();checkHealth();}});
-render();checkHealth();restore();
-</script>
+  <p>Venice版はOx Alpha / OpenRouter版へ置き換えました。<a href="/ox-alpha/">Ox Alpha Chatを開く</a></p>
 </body>
 </html>
