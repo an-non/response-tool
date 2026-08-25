@@ -30,26 +30,34 @@ function parseJson(text) {
   throw Error('memory_invalid_json');
 }
 
-function weighted(items, field) {
+function normalizedSourceTurns(value, startTurn, endTurn) {
+  const valid = [...new Set(array(value)
+    .map(Number)
+    .filter(turn => Number.isInteger(turn) && turn >= startTurn && turn <= endTurn))]
+    .slice(0, OX_MEMORY_BLOCK_SIZE);
+  return valid.length ? valid : Array.from({ length: endTurn - startTurn + 1 }, (_, offset) => startTurn + offset);
+}
+
+function weighted(items, field, startTurn, endTurn) {
   return array(items).slice(0, 16).map(item => ({
     [field]: clean(item?.[field] || item?.label || item?.text, 220),
     note: clean(item?.note || item?.reason, 360),
     weight: clamp01(item?.weight),
-    source_turns: array(item?.source_turns).map(Number).filter(Number.isInteger).slice(0, OX_MEMORY_BLOCK_SIZE),
+    source_turns: normalizedSourceTurns(item?.source_turns, startTurn, endTurn),
   })).filter(item => item[field]);
 }
 
 function normalizeBlock(raw, blockNo, startTurn, endTurn) {
   return {
-    schema_version: 'ox-memory-1.0',
+    schema_version: 'ox-memory-1.1',
     block_no: blockNo,
     turn_range: [startTurn, endTurn],
     summary: clean(raw?.summary, 1400),
-    facts: weighted(raw?.facts, 'fact'),
-    preferences: weighted(raw?.preferences, 'preference'),
-    decisions: weighted(raw?.decisions, 'decision'),
-    open_threads: weighted(raw?.open_threads, 'thread'),
-    episodic: weighted(raw?.episodic, 'event'),
+    facts: weighted(raw?.facts, 'fact', startTurn, endTurn),
+    preferences: weighted(raw?.preferences, 'preference', startTurn, endTurn),
+    decisions: weighted(raw?.decisions, 'decision', startTurn, endTurn),
+    open_threads: weighted(raw?.open_threads, 'thread', startTurn, endTurn),
+    episodic: weighted(raw?.episodic, 'event', startTurn, endTurn),
     recall_keys: [...new Set(array(raw?.recall_keys).map(value => clean(value, 140)).filter(Boolean))].slice(0, 40),
   };
 }
@@ -89,7 +97,7 @@ function mergeStrings(previous, next, limit = 50) {
 function mergeProfile(previousPayload, block, sessionId) {
   const previous = previousPayload || {};
   return {
-    schema_version: 'ox-profile-memory-1.0',
+    schema_version: 'ox-profile-memory-1.1',
     updated_from_session: sessionId,
     included_through_block: block.block_no,
     summary: clean([previous.summary, block.summary].filter(Boolean).join(' / Latest: '), 2200),
@@ -116,12 +124,12 @@ function memoryPrompt(turns, priorMemory, blockNo, startTurn, endTurn) {
         'open_threads: unresolved tasks/questions that should be continued later.',
         'episodic: meaningful events worth recalling later, not routine small talk.',
         'Weights are 0..1 future usefulness. Omit low-value transient chatter.',
-        'Every item must cite source_turns from the supplied block only.',
+        `Every item must cite source_turns using only integers from ${startTurn} through ${endTurn}.`,
       ].join(' '),
     },
     {
       role: 'user',
-      content: `Classify turns ${startTurn}-${endTurn} as memory block ${blockNo}.\n\nPRIOR MEMORY (context only; do not copy items without support in this block):\n${JSON.stringify(priorMemory || {}, null, 2)}\n\nTRANSCRIPT:\n${transcript}\n\nReturn exactly:\n{\n  "summary":"...",\n  "facts":[{"fact":"...","note":"...","weight":0.0,"source_turns":[1]}],\n  "preferences":[{"preference":"...","note":"...","weight":0.0,"source_turns":[1]}],\n  "decisions":[{"decision":"...","note":"...","weight":0.0,"source_turns":[1]}],\n  "open_threads":[{"thread":"...","note":"...","weight":0.0,"source_turns":[1]}],\n  "episodic":[{"event":"...","note":"...","weight":0.0,"source_turns":[1]}],\n  "recall_keys":["..."]\n}`,
+      content: `Classify turns ${startTurn}-${endTurn} as memory block ${blockNo}.\n\nPRIOR MEMORY (context only; do not copy items without support in this block):\n${JSON.stringify(priorMemory || {}, null, 2)}\n\nTRANSCRIPT:\n${transcript}\n\nReturn exactly:\n{\n  "summary":"...",\n  "facts":[{"fact":"...","note":"...","weight":0.0,"source_turns":[${startTurn}]}],\n  "preferences":[{"preference":"...","note":"...","weight":0.0,"source_turns":[${startTurn}]}],\n  "decisions":[{"decision":"...","note":"...","weight":0.0,"source_turns":[${startTurn}]}],\n  "open_threads":[{"thread":"...","note":"...","weight":0.0,"source_turns":[${startTurn}]}],\n  "episodic":[{"event":"...","note":"...","weight":0.0,"source_turns":[${startTurn}]}],\n  "recall_keys":["..."]\n}`,
     },
   ];
 }
