@@ -1,5 +1,5 @@
 import { architectureRoute } from '../src/app.js';
-import { oxAlphaHealth, oxAlphaRelay } from '../src/ox-alpha-relay.js';
+import { oxAlphaHealth, oxAlphaHistory, oxAlphaRelay } from '../src/ox-alpha-relay.js';
 
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -14,7 +14,10 @@ export default async function handler(req, res) {
     return oxAlphaRelay(req, res);
   }
   if (req.method === 'GET' && mode === 'ox-alpha-health') {
-    return json(res, 200, oxAlphaHealth());
+    return json(res, 200, await oxAlphaHealth());
+  }
+  if (req.method === 'GET' && mode === 'ox-alpha-history') {
+    return oxAlphaHistory(req, res);
   }
   return architectureRoute(req, res);
 }
