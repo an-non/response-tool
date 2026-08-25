@@ -9,10 +9,10 @@ import {
 import { conversationToken, verifyConversationToken } from './conversation-auth.js';
 
 const VENICE_ENDPOINT = 'https://api.venice.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = process.env.VENICE_MODEL || 'venice-uncensored';
-const DEFAULT_VISION_MODEL = process.env.VENICE_VISION_MODEL || 'qwen3-vl-235b-a22b';
+const DEFAULT_MODEL = process.env.VENICE_MODEL || 'venice-uncensored-1-2';
+const DEFAULT_VISION_MODEL = process.env.VENICE_VISION_MODEL || DEFAULT_MODEL;
 const MAX_ATTACHMENTS = 4;
-const MAX_TOTAL_ATTACHMENT_BYTES = 2_621_440; // 2.5 MiB before base64 expansion; keeps Vercel request bodies comfortably bounded.
+const MAX_TOTAL_ATTACHMENT_BYTES = 2_621_440;
 const MAX_HISTORY_TURNS = 10;
 
 const json = (res, status, body) => {
@@ -24,6 +24,14 @@ const json = (res, status, body) => {
 
 const traceId = () => `vr_${Date.now()}_${crypto.randomBytes(5).toString('hex')}`;
 const clean = (value, limit = 4000) => String(value || '').slice(0, limit);
+
+function normalizedApiKey() {
+  let key = String(process.env.VENICE_API_KEY || '').trim();
+  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1).trim();
+  }
+  return key;
+}
 
 function parseDataUrl(value) {
   const match = /^data:([^;,]+)?;base64,([A-Za-z0-9+/=\r\n]+)$/.exec(String(value || ''));
@@ -42,13 +50,8 @@ function normalizeAttachments(input) {
     const name = clean(item?.name || `attachment-${index + 1}`, 180).trim() || `attachment-${index + 1}`;
     const parsed = parseDataUrl(item?.data);
     totalBytes += parsed.bytes;
-    return {
-      name,
-      mime: clean(item?.type || parsed.mime, 160) || parsed.mime,
-      dataUrl: parsed.dataUrl,
-      bytes: parsed.bytes,
-      isImage: (clean(item?.type || parsed.mime, 160) || parsed.mime).toLowerCase().startsWith('image/'),
-    };
+    const mime = clean(item?.type || parsed.mime, 160) || parsed.mime;
+    return { name, mime, dataUrl: parsed.dataUrl, bytes: parsed.bytes, isImage: mime.toLowerCase().startsWith('image/') };
   });
   if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error('attachments_too_large');
   return output;
@@ -71,7 +74,6 @@ async function resolveSession(payload) {
     if (active?.session_id && String(active.session_id) === sessionId) {
       return { profileId, sessionId, clientId, clientKey, access: 'client_active_session' };
     }
-
     const supplied = await readSessionManifest(profileId, sessionId);
     if (Number(supplied?.turn_count || 0) > 0) throw new Error('venice_session_unauthorized');
     return { profileId, sessionId, clientId, clientKey, access: 'new_client_session' };
@@ -100,13 +102,7 @@ function currentUserContent(requestText, attachments) {
     if (attachment.isImage) {
       content.push({ type: 'image_url', image_url: { url: attachment.dataUrl } });
     } else {
-      content.push({
-        type: 'file',
-        file: {
-          file_data: attachment.dataUrl,
-          filename: attachment.name,
-        },
-      });
+      content.push({ type: 'file', file: { file_data: attachment.dataUrl, filename: attachment.name } });
     }
   }
   return content;
@@ -121,19 +117,27 @@ function requestRecordText(requestText, attachments) {
 function extractText(body) {
   const value = body?.choices?.[0]?.message?.content;
   if (typeof value === 'string') return value.trim();
-  if (Array.isArray(value)) {
-    return value.map(part => typeof part === 'string' ? part : part?.text).filter(Boolean).join('\n').trim();
-  }
+  if (Array.isArray(value)) return value.map(part => typeof part === 'string' ? part : part?.text).filter(Boolean).join('\n').trim();
   return '';
+}
+
+function parseUpstream(raw) {
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+
+function upstreamDetail(body, raw) {
+  return clean(
+    body?.error?.message || body?.error?.detail || body?.detail || body?.message || raw || '',
+    1200,
+  ).trim() || null;
 }
 
 export async function veniceRelay(req, res) {
   if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method_not_allowed' });
   const trace_id = traceId();
+  const apiKey = normalizedApiKey();
 
-  if (!process.env.VENICE_API_KEY) {
-    return json(res, 503, { ok: false, trace_id, error: 'venice_api_key_missing' });
-  }
+  if (!apiKey) return json(res, 503, { ok: false, trace_id, error: 'venice_api_key_missing' });
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const requestText = clean(body.request_text, 24_000).trim();
@@ -143,9 +147,7 @@ export async function veniceRelay(req, res) {
   } catch (error) {
     return json(res, 413, { ok: false, trace_id, error: String(error?.message || error) });
   }
-  if (!requestText && !attachments.length) {
-    return json(res, 400, { ok: false, trace_id, error: 'request_required' });
-  }
+  if (!requestText && !attachments.length) return json(res, 400, { ok: false, trace_id, error: 'request_required' });
 
   let session;
   try {
@@ -164,41 +166,59 @@ export async function veniceRelay(req, res) {
         content: [
           'You are the Venice renderer for Response Tool.',
           'This Venice chat is isolated from the Yuki profile, relationship state, permissions, and memory namespace.',
-          'Use the supplied recent conversation turns as continuity context when relevant.',
-          'Attachments in the current user message are request-scoped. Do not claim they remain available in later turns unless the user attaches them again.',
-          'Answer the user directly in the language they use unless they request another language.',
+          'Use recent conversation turns only as continuity context when relevant.',
+          'Current-message attachments are request-scoped and are not guaranteed to exist on later turns.',
+          'Answer directly in the language used by the user unless another language is requested.',
         ].join(' '),
       },
       ...historyMessages(recentTurns),
       { role: 'user', content: currentUserContent(requestText, attachments) },
     ];
 
+    const requestBody = {
+      model,
+      messages,
+      stream: false,
+      max_tokens: Math.max(64, Math.min(Number(body.max_output_tokens) || 1800, 4000)),
+    };
+
     const upstream = await fetch(VENICE_ENDPOINT, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.VENICE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-        max_completion_tokens: Math.max(64, Math.min(Number(body.max_output_tokens) || 1800, 4000)),
-      }),
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
     });
-    const upstreamBody = await upstream.json().catch(() => ({}));
+    const raw = await upstream.text();
+    const upstreamBody = parseUpstream(raw);
+
     if (!upstream.ok) {
+      const detail = upstreamDetail(upstreamBody, raw);
+      const errorCode = clean(upstreamBody?.error?.code || upstreamBody?.code || '', 160) || null;
+      const upstreamRequestId = upstream.headers.get('x-request-id') || upstream.headers.get('request-id') || null;
+      console.error('[venice-upstream] rejected', {
+        trace_id,
+        status: upstream.status,
+        model,
+        error_code: errorCode,
+        detail,
+        upstream_request_id: upstreamRequestId,
+      });
       return json(res, upstream.status === 429 ? 429 : 502, {
         ok: false,
         trace_id,
         error: upstream.status === 429 ? 'venice_rate_limit' : 'venice_external_error',
         http_status: upstream.status,
-        detail: clean(upstreamBody?.error?.message || upstreamBody?.message || '', 800) || null,
+        error_code: errorCode,
+        detail,
+        upstream_request_id: upstreamRequestId,
+        model,
       });
     }
 
     const text = extractText(upstreamBody);
-    if (!text) return json(res, 502, { ok: false, trace_id, error: 'venice_empty_response' });
+    if (!text) {
+      console.error('[venice-upstream] empty response', { trace_id, model, raw_preview: clean(raw, 600) });
+      return json(res, 502, { ok: false, trace_id, error: 'venice_empty_response', model });
+    }
 
     const recordText = requestRecordText(requestText, attachments);
     const recorded = await recordConversationTurn({
@@ -208,17 +228,10 @@ export async function veniceRelay(req, res) {
       requestId: clean(body.request_id || trace_id, 220),
       requestText: recordText,
       responseText: text,
-      yukiState: {
-        renderer: 'venice',
-        isolated_from_yuki: true,
-        attachment_count: attachments.length,
-        model,
-      },
+      yukiState: { renderer: 'venice', isolated_from_yuki: true, attachment_count: attachments.length, model },
     });
 
-    if (session.clientId && session.clientKey) {
-      await bindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
-    }
+    if (session.clientId && session.clientKey) await bindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
 
     return json(res, 200, {
       ok: true,
