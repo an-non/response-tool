@@ -5,7 +5,7 @@ const SPEECH_MODEL = process.env.OX_SPEECH_MODEL || 'fish-audio/s2.1-pro-free:fr
 const MAX_SPEECH_INPUT_BYTES = 32_000;
 const MAX_REFERENCE_AUDIO_BYTES = 2_097_152;
 const MAX_AUDIO_OUTPUT_BYTES = 3_000_000;
-const AUDIO_FORMATS = new Set(['mp3', 'wav', 'pcm']);
+const AUDIO_FORMATS = new Set(['mp3', 'pcm']);
 
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -32,13 +32,12 @@ function apiKeyInfo() {
 }
 
 function mimeForFormat(format) {
-  if (format === 'wav') return 'audio/wav';
   if (format === 'pcm') return 'audio/L16';
   return 'audio/mpeg';
 }
 
 function extensionForFormat(format) {
-  return format === 'wav' ? 'wav' : format === 'pcm' ? 'pcm' : 'mp3';
+  return format === 'pcm' ? 'pcm' : 'mp3';
 }
 
 function parseAudioDataUrl(value, declaredType = '') {
@@ -165,7 +164,7 @@ export async function oxSpeechRelay(req, res) {
     persistent: false,
   };
 
-  console.info('[openrouter-fish-speech] generated', { trace_id, model: SPEECH_MODEL, bytes: buffer.byteLength, format, elapsed_ms: elapsedMs, reference_audio_received: !!referenceAudio });
+  console.info('[openrouter-fish-speech] generated', { trace_id, model: SPEECH_MODEL, bytes: buffer.byteLength, format, elapsed_ms: elapsedMs, reference_audio_received: !!referenceAudio, voice_supplied: !!voice });
   return json(res, 200, {
     ok: true,
     service: 'response-tool-speech',
@@ -175,7 +174,7 @@ export async function oxSpeechRelay(req, res) {
     provider: 'openrouter',
     model: SPEECH_MODEL,
     api_key_source: source,
-    generation: { input_bytes: inputBytes, audio_bytes: buffer.byteLength, response_format: format, elapsed_ms: elapsedMs },
+    generation: { input_bytes: inputBytes, audio_bytes: buffer.byteLength, response_format: format, elapsed_ms: elapsedMs, voice_supplied: !!voice },
     reference_audio: referenceAudio ? { ...referenceAudio, received: true, persistent: false, forwarded_to_openrouter: false } : null,
     artifacts: [artifact],
     artifact_handoff: { enabled: true, mode: 'inline_base64', persistent: false, kind: 'audio' },
