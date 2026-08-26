@@ -26,8 +26,8 @@ const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = process.env.OX_ALPHA_MODEL || 'stealth/ox-alpha';
 const MAX_ATTACHMENTS = 4;
 const MAX_TOTAL_ATTACHMENT_BYTES = 2_621_440;
-const MAX_HISTORY_TURNS = 20;
-const MAX_HISTORY_ITEM_CHARS = 16_000;
+const MAX_HISTORY_TURNS = 8;
+const MAX_HISTORY_ITEM_CHARS = 12_000;
 const MAX_REQUEST_CHARS = 100_000;
 const MAX_TEXT_ATTACHMENT_CHARS = 120_000;
 const DEFAULT_OUTPUT_TOKENS = 6_000;
@@ -235,6 +235,26 @@ function retryAfterSeconds(headers) {
   return Number.isFinite(at) ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : null;
 }
 
+function textChars(content) {
+  if (typeof content === 'string') return content.length;
+  if (!Array.isArray(content)) return 0;
+  return content.reduce((sum, part) => sum + (typeof part?.text === 'string' ? part.text.length : 0), 0);
+}
+
+function requestDiagnostics(messages, recent, memoryContext, attachments, requestText) {
+  return {
+    history_turns: Array.isArray(recent) ? recent.length : 0,
+    history_messages: Math.max(0, messages.length - 2),
+    history_chars: historyMessages(recent).reduce((sum, message) => sum + textChars(message.content), 0),
+    memory_chars: String(memoryContext || '').length,
+    current_request_chars: requestText.length,
+    current_attachment_count: attachments.length,
+    current_attachment_bytes: attachments.reduce((sum, attachment) => sum + Number(attachment.bytes || 0), 0),
+    message_count: messages.length,
+    text_chars_total: messages.reduce((sum, message) => sum + textChars(message.content), 0),
+  };
+}
+
 async function longTermContext(profileId) {
   if (!oxDbConfigured()) return '';
   try { return profileMemoryContext(await getProfileMemory(profileId)); }
@@ -334,8 +354,8 @@ export async function oxAlphaRelay(req, res) {
     const systemParts = [
       'You are Ox Alpha running through OpenRouter for Response Tool.',
       'This chat is isolated from the Yuki profile, relationship state, permissions, and memory namespace.',
-      'Use durable memory as fallible derived context. The current user message always overrides stale or conflicting memory.',
-      'Use recent conversation turns for local continuity.',
+      'Use durable memory as fallible derived context for older information. The current user message always overrides stale or conflicting memory.',
+      'Use only the recent raw turns for local continuity; older raw turns are intentionally omitted because durable memory summarizes them.',
       'Current-message attachments are request-scoped and are not guaranteed to exist on later turns.',
       'Answer directly in the language used by the user unless another language is requested.',
       'When the user requests a long answer, complete it rather than stopping merely to be concise.',
@@ -346,11 +366,18 @@ export async function oxAlphaRelay(req, res) {
       ...historyMessages(recent),
       { role: 'user', content: currentUserContent(requestText, attachments) },
     ];
+    const requestMeta = requestDiagnostics(messages, recent, memoryContext, attachments, requestText);
+    console.info('[openrouter-ox-alpha] request prepared', {
+      trace_id,
+      model: DEFAULT_MODEL,
+      ...requestMeta,
+    });
 
     const headers = {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
       'X-Title': 'Response Tool / Ox Alpha',
+      'X-OpenRouter-Metadata': 'enabled',
     };
     if (process.env.VERCEL_URL) headers['HTTP-Referer'] = `https://${process.env.VERCEL_URL}`;
 
@@ -389,6 +416,7 @@ export async function oxAlphaRelay(req, res) {
         error_code: errorCode,
         retry_after_seconds: retryAfter,
         elapsed_ms: elapsedMs,
+        request: requestMeta,
         detail,
       });
       return json(res, upstream.status === 429 ? 429 : 502, {
@@ -401,6 +429,7 @@ export async function oxAlphaRelay(req, res) {
         provider,
         retry_after_seconds: retryAfter,
         model: DEFAULT_MODEL,
+        request: requestMeta,
       });
     }
 
@@ -410,6 +439,7 @@ export async function oxAlphaRelay(req, res) {
         trace_id,
         model: DEFAULT_MODEL,
         elapsed_ms: elapsedMs,
+        request: requestMeta,
         ...diagnostics,
       });
       return json(res, 502, {
@@ -421,6 +451,7 @@ export async function oxAlphaRelay(req, res) {
           ? 'The provider ended the completion at the output-token limit before returning visible text.'
           : 'The provider returned a successful response without visible assistant text.',
         diagnostics,
+        request: requestMeta,
       });
     }
 
@@ -441,6 +472,7 @@ export async function oxAlphaRelay(req, res) {
         finish_reason: diagnostics.finish_reason,
         native_finish_reason: diagnostics.native_finish_reason,
         elapsed_ms: elapsedMs,
+        request_diagnostics: requestMeta,
       },
     };
 
@@ -478,6 +510,7 @@ export async function oxAlphaRelay(req, res) {
       finish_reason: diagnostics.finish_reason,
       native_finish_reason: diagnostics.native_finish_reason,
       api_key_source: apiKeySource,
+      request: requestMeta,
       generation: {
         max_output_tokens: maxTokens,
         elapsed_ms: elapsedMs,
@@ -488,7 +521,7 @@ export async function oxAlphaRelay(req, res) {
         provider: oxDbConfigured() ? 'neon_postgres_isolated' : 'legacy_fallback',
         long_term_enabled: oxDbConfigured(),
         compression_due: compressionDue,
-        compression_window_turns: 6,
+        compression_window_turns: 12,
         block_no: Number(recorded?.block_no || 0),
       },
       attachments: attachments.map(file => ({ name: file.name, type: file.mime, bytes: file.bytes, kind: file.kind })),
