@@ -1,6 +1,7 @@
 import { architectureRoute } from '../src/app.js';
 import { oxAlphaHealth, oxAlphaHistory, oxAlphaRelay } from '../src/ox-alpha-relay.js';
 import { artifactLimits, artifactTestResponse, decorateOxResponse } from '../src/ox-artifacts.js';
+import { oxSpeechHealth, oxSpeechRelay } from '../src/ox-speech.js';
 
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -35,6 +36,9 @@ export default async function handler(req, res) {
   if (req.method === 'POST' && mode === 'ox-alpha') {
     return oxAlphaRelay(req, artifactAwareResponse(req, res));
   }
+  if (req.method === 'POST' && mode === 'ox-speech') {
+    return oxSpeechRelay(req, res);
+  }
   if (req.method === 'GET' && mode === 'ox-alpha-health') {
     const health = await oxAlphaHealth();
     return json(res, 200, {
@@ -46,6 +50,7 @@ export default async function handler(req, res) {
         test_endpoint: '/api/architecture?mode=ox-alpha-artifact-test',
         ...artifactLimits,
       },
+      speech: oxSpeechHealth(),
     });
   }
   if (req.method === 'GET' && mode === 'ox-alpha-artifact-test') {
