@@ -1,5 +1,4 @@
 import {
-  OX_MEMORY_BLOCK_SIZE,
   getMemoryBlock,
   getProfileMemory,
   getTurnsRange,
@@ -9,6 +8,8 @@ import {
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const MEMORY_MODEL = process.env.OX_MEMORY_MODEL || process.env.OX_ALPHA_MODEL || 'stealth/ox-alpha';
+const MEMORY_WINDOW_SIZE = 6;
+const V2_BLOCK_NAMESPACE = 1_000_000;
 const clean = (value, limit = 800) => String(value || '').slice(0, limit).trim();
 const array = value => Array.isArray(value) ? value : [];
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
@@ -34,7 +35,7 @@ function normalizedSourceTurns(value, startTurn, endTurn) {
   const valid = [...new Set(array(value)
     .map(Number)
     .filter(turn => Number.isInteger(turn) && turn >= startTurn && turn <= endTurn))]
-    .slice(0, OX_MEMORY_BLOCK_SIZE);
+    .slice(0, MEMORY_WINDOW_SIZE);
   return valid.length ? valid : Array.from({ length: endTurn - startTurn + 1 }, (_, offset) => startTurn + offset);
 }
 
@@ -49,7 +50,7 @@ function weighted(items, field, startTurn, endTurn) {
 
 function normalizeBlock(raw, blockNo, startTurn, endTurn) {
   return {
-    schema_version: 'ox-memory-1.1',
+    schema_version: 'ox-memory-1.2',
     block_no: blockNo,
     turn_range: [startTurn, endTurn],
     summary: clean(raw?.summary, 1400),
@@ -77,7 +78,7 @@ function mergeWeighted(previous, next, field, { decay = 0.98, limit = 30 } = {})
       [field]: label,
       note: clean(item?.note || prior?.note, 420),
       weight: Math.max(clamp01(item?.weight), clamp01(prior?.weight)),
-      source_turns: [...new Set([...array(prior?.source_turns), ...array(item?.source_turns)].map(Number).filter(Number.isInteger))].slice(-18),
+      source_turns: [...new Set([...array(prior?.source_turns), ...array(item?.source_turns)].map(Number).filter(Number.isInteger))].slice(-24),
     });
   }
   return [...map.values()].sort((a, b) => b.weight - a.weight).slice(0, limit);
@@ -97,9 +98,10 @@ function mergeStrings(previous, next, limit = 50) {
 function mergeProfile(previousPayload, block, sessionId) {
   const previous = previousPayload || {};
   return {
-    schema_version: 'ox-profile-memory-1.1',
+    schema_version: 'ox-profile-memory-1.2',
     updated_from_session: sessionId,
     included_through_block: block.block_no,
+    included_through_turn: Number(block.turn_range?.[1] || 0),
     summary: clean([previous.summary, block.summary].filter(Boolean).join(' / Latest: '), 2200),
     facts: mergeWeighted(previous.facts, block.facts, 'fact', { decay: 0.995, limit: 36 }),
     preferences: mergeWeighted(previous.preferences, block.preferences, 'preference', { decay: 0.985, limit: 30 }),
@@ -139,8 +141,20 @@ async function callClassifier(messages) {
   if (!key) throw Error('ox_api_key_missing_for_memory');
   const response = await fetch(OPENROUTER_ENDPOINT, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-Title': 'Response Tool / Ox Memory' },
-    body: JSON.stringify({ model: MEMORY_MODEL, messages, stream: false, temperature: 0.1, max_tokens: 900 }),
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'X-Title': 'Response Tool / Ox Memory',
+      'X-OpenRouter-Metadata': 'enabled',
+    },
+    body: JSON.stringify({
+      model: MEMORY_MODEL,
+      messages,
+      stream: false,
+      temperature: 0.1,
+      max_tokens: 2400,
+      reasoning: { effort: 'minimal', exclude: true },
+    }),
   });
   const raw = await response.text();
   if (!response.ok) throw Error(`memory_provider_http_${response.status}:${clean(raw, 600)}`);
@@ -164,17 +178,21 @@ export function profileMemoryContext(row) {
   return `LONG-TERM MEMORY (derived context; verify against current user message when conflicting):\n${JSON.stringify(useful)}`;
 }
 
+export function memoryCompressionDue(turnNo) {
+  const value = Number(turnNo);
+  return Number.isInteger(value) && value >= MEMORY_WINDOW_SIZE && value % MEMORY_WINDOW_SIZE === 0;
+}
+
 export async function compressDueBlock({ profileId, sessionId, turnNo }) {
-  if (!Number.isInteger(Number(turnNo)) || Number(turnNo) < OX_MEMORY_BLOCK_SIZE || Number(turnNo) % OX_MEMORY_BLOCK_SIZE !== 0) {
-    return { due: false };
-  }
-  const blockNo = Math.ceil(Number(turnNo) / OX_MEMORY_BLOCK_SIZE);
+  if (!memoryCompressionDue(turnNo)) return { due: false };
+  const windowNo = Math.ceil(Number(turnNo) / MEMORY_WINDOW_SIZE);
+  const blockNo = V2_BLOCK_NAMESPACE + windowNo;
   const existing = await getMemoryBlock(profileId, sessionId, blockNo);
   if (existing?.status === 'ready') return { due: false, already_ready: true, block_no: blockNo };
-  const startTurn = (blockNo - 1) * OX_MEMORY_BLOCK_SIZE + 1;
-  const endTurn = blockNo * OX_MEMORY_BLOCK_SIZE;
+  const startTurn = (windowNo - 1) * MEMORY_WINDOW_SIZE + 1;
+  const endTurn = windowNo * MEMORY_WINDOW_SIZE;
   const turns = await getTurnsRange(profileId, sessionId, startTurn, endTurn);
-  if (turns.length !== OX_MEMORY_BLOCK_SIZE) return { due: false, incomplete: true, block_no: blockNo };
+  if (turns.length !== MEMORY_WINDOW_SIZE) return { due: false, incomplete: true, block_no: blockNo };
   const prior = await getProfileMemory(profileId);
   try {
     await saveMemoryBlock({ profileId, sessionId, blockNo, startTurn, endTurn, status: 'pending', payload: {} });
@@ -182,10 +200,10 @@ export async function compressDueBlock({ profileId, sessionId, turnNo }) {
     await saveMemoryBlock({ profileId, sessionId, blockNo, startTurn, endTurn, status: 'ready', payload: classified });
     const merged = mergeProfile(prior?.payload, classified, sessionId);
     await saveProfileMemory({ profileId, sourceSessionId: sessionId, sourceBlockNo: blockNo, payload: merged });
-    return { due: true, compressed: true, block_no: blockNo };
+    return { due: true, compressed: true, block_no: blockNo, window_size: MEMORY_WINDOW_SIZE };
   } catch (error) {
     await saveMemoryBlock({ profileId, sessionId, blockNo, startTurn, endTurn, status: 'error', payload: {}, error: clean(error?.message || error, 1200) }).catch(() => {});
     console.error('[ox-memory] compression failed', { profileId, sessionId, blockNo, error: String(error?.message || error) });
-    return { due: true, compressed: false, block_no: blockNo, error: String(error?.message || error) };
+    return { due: true, compressed: false, block_no: blockNo, window_size: MEMORY_WINDOW_SIZE, error: String(error?.message || error) };
   }
 }
