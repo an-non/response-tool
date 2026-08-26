@@ -95,7 +95,7 @@ function parseDataUrl(value) {
 function textLike(name, mime) {
   if (mime.startsWith('text/')) return true;
   if (['application/json', 'application/xml', 'application/javascript', 'application/x-javascript'].includes(mime)) return true;
-  return /\.(txt|md|markdown|csv|tsv|json|jsonl|xml|yaml|yml|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|kts|swift|c|h|cpp|hpp|cs|php|sh|bash|zsh|fish|sql|css|scss|sass|less|html|htm|vue|svelte|toml|ini|cfg|conf|log)$/i.test(name);
+  return /\.(txt|md|markdown|csv|tsv|json|jsonl|xml|yaml|yml|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|kts|swift|c|h|cpp|hpp|cs|php|sh|bash|zsh|fish|bat|cmd|ps1|psm1|psd1|vbs|vbe|wsf|wsh|reg|inf|sql|css|scss|sass|less|html|htm|vue|svelte|toml|ini|cfg|conf|log)$/i.test(name);
 }
 
 function normalizeAttachments(input) {
