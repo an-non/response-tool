@@ -19,15 +19,19 @@ import {
   recordTurn as dbRecordTurn,
   resolveActiveSession as dbResolveActiveSession,
 } from './ox-memory-db.js';
-import { compressDueBlock, profileMemoryContext } from './ox-memory-engine.js';
+import { compressDueBlock, memoryCompressionDue, profileMemoryContext } from './ox-memory-engine.js';
 import { oxMemoryStorageInfo } from './ox-memory-storage.js';
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODEL = process.env.OX_ALPHA_MODEL || 'stealth/ox-alpha';
 const MAX_ATTACHMENTS = 4;
 const MAX_TOTAL_ATTACHMENT_BYTES = 2_621_440;
-const MAX_HISTORY_TURNS = 10;
+const MAX_HISTORY_TURNS = 20;
+const MAX_HISTORY_ITEM_CHARS = 16_000;
+const MAX_REQUEST_CHARS = 100_000;
 const MAX_TEXT_ATTACHMENT_CHARS = 120_000;
+const DEFAULT_OUTPUT_TOKENS = 6_000;
+const MAX_OUTPUT_TOKENS = 12_000;
 const PROFILE_ID = 'ox-alpha-default';
 
 const json = (res, status, body) => {
@@ -40,7 +44,8 @@ const json = (res, status, body) => {
 const traceId = () => `ox_${Date.now()}_${crypto.randomBytes(5).toString('hex')}`;
 const clean = (value, limit = 4000) => String(value || '').slice(0, limit);
 const safeEqual = (left, right) => {
-  const a = Buffer.from(String(left || '')), b = Buffer.from(String(right || ''));
+  const a = Buffer.from(String(left || ''));
+  const b = Buffer.from(String(right || ''));
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 
@@ -117,7 +122,9 @@ async function resolveSession(payload) {
   const suppliedToken = clean(payload?.session_token || '', 1024);
   const clientId = clean(payload?.client_id || '', 220);
   const clientKey = clean(payload?.client_key || '', 220);
-  if (suppliedToken && verifySessionToken(profileId, sessionId, suppliedToken)) return { profileId, sessionId, clientId, clientKey, access: 'session_token' };
+  if (suppliedToken && verifySessionToken(profileId, sessionId, suppliedToken)) {
+    return { profileId, sessionId, clientId, clientKey, access: 'session_token' };
+  }
 
   if (oxDbConfigured()) {
     if (clientId && clientKey) {
@@ -150,8 +157,8 @@ async function recentTurns(profileId, sessionId) {
 function historyMessages(turns) {
   const messages = [];
   for (const turn of Array.isArray(turns) ? turns : []) {
-    const request = clean(turn?.request ?? turn?.request_text, 6000).trim();
-    const response = clean(turn?.response ?? turn?.response_text, 6000).trim();
+    const request = clean(turn?.request ?? turn?.request_text, MAX_HISTORY_ITEM_CHARS).trim();
+    const response = clean(turn?.response ?? turn?.response_text, MAX_HISTORY_ITEM_CHARS).trim();
     if (request) messages.push({ role: 'user', content: request });
     if (response) messages.push({ role: 'assistant', content: response });
   }
@@ -185,13 +192,56 @@ function extractText(body) {
   return '';
 }
 
-function parseUpstream(raw) { try { return raw ? JSON.parse(raw) : {}; } catch { return {}; } }
-function upstreamDetail(body, raw) { return clean(body?.error?.message || body?.error?.detail || body?.detail || body?.message || raw || '', 1400).trim() || null; }
+function parseUpstream(raw) {
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+
+function upstreamDetail(body, raw) {
+  return clean(
+    body?.error?.metadata?.raw ||
+    body?.error?.message ||
+    body?.error?.detail ||
+    body?.detail ||
+    body?.message ||
+    raw || '',
+    1800,
+  ).trim() || null;
+}
+
+function responseDiagnostics(body) {
+  const choice = body?.choices?.[0] || {};
+  const message = choice?.message || {};
+  const reasoning = message?.reasoning;
+  const reasoningDetails = message?.reasoning_details;
+  const usage = body?.usage || {};
+  const completionDetails = usage?.completion_tokens_details || {};
+  return {
+    finish_reason: choice?.finish_reason || null,
+    native_finish_reason: choice?.native_finish_reason || null,
+    reasoning_present: !!(String(reasoning || '').trim() || (Array.isArray(reasoningDetails) && reasoningDetails.length)),
+    reasoning_chars: String(reasoning || '').length,
+    reasoning_tokens: Number(completionDetails?.reasoning_tokens || 0) || null,
+    completion_tokens: Number(usage?.completion_tokens || 0) || null,
+    provider: body?.provider || body?.error?.metadata?.provider_name || null,
+  };
+}
+
+function retryAfterSeconds(headers) {
+  const raw = headers.get('retry-after');
+  if (!raw) return null;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric >= 0) return numeric;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : null;
+}
 
 async function longTermContext(profileId) {
   if (!oxDbConfigured()) return '';
   try { return profileMemoryContext(await getProfileMemory(profileId)); }
-  catch (error) { console.error('[ox-memory] read failed', { error: String(error?.message || error) }); return ''; }
+  catch (error) {
+    console.error('[ox-memory] read failed', { error: String(error?.message || error) });
+    return '';
+  }
 }
 
 export async function oxAlphaHealth() {
@@ -218,6 +268,14 @@ export async function oxAlphaHealth() {
     deployment_url: process.env.VERCEL_URL || null,
     provider: 'openrouter',
     model: DEFAULT_MODEL,
+    limits: {
+      request_chars: MAX_REQUEST_CHARS,
+      history_turns: MAX_HISTORY_TURNS,
+      history_item_chars: MAX_HISTORY_ITEM_CHARS,
+      default_output_tokens: DEFAULT_OUTPUT_TOKENS,
+      max_output_tokens: MAX_OUTPUT_TOKENS,
+      reasoning_effort: 'low',
+    },
     memory,
   };
 }
@@ -227,7 +285,9 @@ export async function oxAlphaHistory(req, res) {
   const profileId = clean(req.query?.profile_id || PROFILE_ID, 160);
   const sessionId = clean(req.query?.session_id || '', 160);
   const token = clean(req.query?.token || '', 1024);
-  if (profileId !== PROFILE_ID || !sessionId || !verifySessionToken(profileId, sessionId, token)) return json(res, 401, { ok: false, error: 'unauthorized' });
+  if (profileId !== PROFILE_ID || !sessionId || !verifySessionToken(profileId, sessionId, token)) {
+    return json(res, 401, { ok: false, error: 'unauthorized' });
+  }
   try {
     const turns = await dbGetHistory(profileId, sessionId, Number(req.query?.limit) || 30);
     return json(res, 200, { ok: true, profile_id: profileId, session_id: sessionId, turns });
@@ -243,7 +303,17 @@ export async function oxAlphaRelay(req, res) {
   if (!apiKey) return json(res, 503, { ok: false, trace_id, error: 'openrouter_api_key_missing', expected_env_key: 'Ox_API' });
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const requestText = clean(body.request_text, 24_000).trim();
+  const rawRequestText = String(body.request_text || '');
+  if (rawRequestText.length > MAX_REQUEST_CHARS) {
+    return json(res, 413, {
+      ok: false,
+      trace_id,
+      error: 'request_text_too_large',
+      request_chars: rawRequestText.length,
+      max_request_chars: MAX_REQUEST_CHARS,
+    });
+  }
+  const requestText = rawRequestText.trim();
   let attachments;
   try { attachments = normalizeAttachments(body.attachments); }
   catch (error) {
@@ -257,7 +327,10 @@ export async function oxAlphaRelay(req, res) {
   catch (error) { return json(res, 401, { ok: false, trace_id, error: String(error?.message || error) }); }
 
   try {
-    const [recent, memoryContext] = await Promise.all([recentTurns(session.profileId, session.sessionId), longTermContext(session.profileId)]);
+    const [recent, memoryContext] = await Promise.all([
+      recentTurns(session.profileId, session.sessionId),
+      longTermContext(session.profileId),
+    ]);
     const systemParts = [
       'You are Ox Alpha running through OpenRouter for Response Tool.',
       'This chat is isolated from the Yuki profile, relationship state, permissions, and memory namespace.',
@@ -265,6 +338,7 @@ export async function oxAlphaRelay(req, res) {
       'Use recent conversation turns for local continuity.',
       'Current-message attachments are request-scoped and are not guaranteed to exist on later turns.',
       'Answer directly in the language used by the user unless another language is requested.',
+      'When the user requests a long answer, complete it rather than stopping merely to be concise.',
     ];
     if (memoryContext) systemParts.push(memoryContext);
     const messages = [
@@ -273,22 +347,82 @@ export async function oxAlphaRelay(req, res) {
       { role: 'user', content: currentUserContent(requestText, attachments) },
     ];
 
-    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'X-Title': 'Response Tool / Ox Alpha' };
+    const headers = {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'X-Title': 'Response Tool / Ox Alpha',
+    };
     if (process.env.VERCEL_URL) headers['HTTP-Referer'] = `https://${process.env.VERCEL_URL}`;
+
+    const requestedOutputTokens = Number(body.max_output_tokens);
+    const maxTokens = Math.max(
+      256,
+      Math.min(Number.isFinite(requestedOutputTokens) && requestedOutputTokens > 0 ? requestedOutputTokens : DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+    );
+    const upstreamStartedAt = Date.now();
     const upstream = await fetch(OPENROUTER_ENDPOINT, {
-      method: 'POST', headers,
-      body: JSON.stringify({ model: DEFAULT_MODEL, messages, stream: false, max_tokens: Math.max(64, Math.min(Number(body.max_output_tokens) || 1800, 4000)) }),
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: DEFAULT_MODEL,
+        messages,
+        stream: false,
+        max_tokens: maxTokens,
+        reasoning: { effort: 'low', exclude: true },
+      }),
     });
     const raw = await upstream.text();
     const upstreamBody = parseUpstream(raw);
+    const elapsedMs = Date.now() - upstreamStartedAt;
+    const diagnostics = responseDiagnostics(upstreamBody);
+
     if (!upstream.ok) {
-      const detail = upstreamDetail(upstreamBody, raw), errorCode = clean(upstreamBody?.error?.code || upstreamBody?.code || '', 160) || null;
-      console.error('[openrouter-ox-alpha] rejected', { trace_id, status: upstream.status, model: DEFAULT_MODEL, error_code: errorCode, detail });
-      return json(res, upstream.status === 429 ? 429 : 502, { ok: false, trace_id, error: upstream.status === 429 ? 'openrouter_rate_limit' : 'openrouter_external_error', http_status: upstream.status, error_code: errorCode, detail, model: DEFAULT_MODEL });
+      const detail = upstreamDetail(upstreamBody, raw);
+      const errorCode = clean(upstreamBody?.error?.code || upstreamBody?.code || '', 160) || null;
+      const provider = upstreamBody?.error?.metadata?.provider_name || diagnostics.provider || null;
+      const retryAfter = retryAfterSeconds(upstream.headers);
+      console.error('[openrouter-ox-alpha] rejected', {
+        trace_id,
+        status: upstream.status,
+        model: DEFAULT_MODEL,
+        provider,
+        error_code: errorCode,
+        retry_after_seconds: retryAfter,
+        elapsed_ms: elapsedMs,
+        detail,
+      });
+      return json(res, upstream.status === 429 ? 429 : 502, {
+        ok: false,
+        trace_id,
+        error: upstream.status === 429 ? 'openrouter_rate_limit' : 'openrouter_external_error',
+        http_status: upstream.status,
+        error_code: errorCode,
+        detail,
+        provider,
+        retry_after_seconds: retryAfter,
+        model: DEFAULT_MODEL,
+      });
     }
 
     const text = extractText(upstreamBody);
-    if (!text) return json(res, 502, { ok: false, trace_id, error: 'openrouter_empty_response', model: DEFAULT_MODEL });
+    if (!text) {
+      console.error('[openrouter-ox-alpha] empty response', {
+        trace_id,
+        model: DEFAULT_MODEL,
+        elapsed_ms: elapsedMs,
+        ...diagnostics,
+      });
+      return json(res, 502, {
+        ok: false,
+        trace_id,
+        error: 'openrouter_empty_response',
+        model: DEFAULT_MODEL,
+        detail: diagnostics.finish_reason === 'length'
+          ? 'The provider ended the completion at the output-token limit before returning visible text.'
+          : 'The provider returned a successful response without visible assistant text.',
+        diagnostics,
+      });
+    }
 
     const recordArgs = {
       profileId: session.profileId,
@@ -297,20 +431,40 @@ export async function oxAlphaRelay(req, res) {
       requestId: clean(body.request_id || trace_id, 220),
       requestText: requestRecordText(requestText, attachments),
       responseText: text,
-      metadata: { renderer: 'ox-alpha', provider: 'openrouter', isolated_from_yuki: true, attachment_count: attachments.length, model: DEFAULT_MODEL },
+      metadata: {
+        renderer: 'ox-alpha',
+        provider: 'openrouter',
+        upstream_provider: diagnostics.provider,
+        isolated_from_yuki: true,
+        attachment_count: attachments.length,
+        model: DEFAULT_MODEL,
+        finish_reason: diagnostics.finish_reason,
+        native_finish_reason: diagnostics.native_finish_reason,
+        elapsed_ms: elapsedMs,
+      },
     };
+
     let recorded;
     if (oxDbConfigured()) {
       recorded = await dbRecordTurn(recordArgs);
-      if (session.clientId && session.clientKey) await dbBindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
-      if (recorded?.compression_due) {
-        waitUntil(compressDueBlock({ profileId: session.profileId, sessionId: session.sessionId, turnNo: Number(recorded.turn_no) }));
+      if (session.clientId && session.clientKey) {
+        await dbBindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
+      }
+      if (memoryCompressionDue(Number(recorded?.turn_no))) {
+        waitUntil(compressDueBlock({
+          profileId: session.profileId,
+          sessionId: session.sessionId,
+          turnNo: Number(recorded.turn_no),
+        }));
       }
     } else {
       recorded = await legacyRecordConversationTurn({ ...recordArgs, yukiState: recordArgs.metadata });
-      if (session.clientId && session.clientKey) await legacyBindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
+      if (session.clientId && session.clientKey) {
+        await legacyBindActiveSession(session.profileId, session.sessionId, session.clientId, session.clientKey);
+      }
     }
 
+    const compressionDue = oxDbConfigured() && memoryCompressionDue(Number(recorded?.turn_no));
     return json(res, 200, {
       ok: true,
       service: 'response-tool-ox-alpha',
@@ -318,13 +472,23 @@ export async function oxAlphaRelay(req, res) {
       result_type: 'generated_text',
       text,
       provider: 'openrouter',
+      upstream_provider: diagnostics.provider,
       model: upstreamBody?.model || DEFAULT_MODEL,
       usage: upstreamBody?.usage || null,
+      finish_reason: diagnostics.finish_reason,
+      native_finish_reason: diagnostics.native_finish_reason,
       api_key_source: apiKeySource,
+      generation: {
+        max_output_tokens: maxTokens,
+        elapsed_ms: elapsedMs,
+        reasoning_tokens: diagnostics.reasoning_tokens,
+        completion_tokens: diagnostics.completion_tokens,
+      },
       memory: {
         provider: oxDbConfigured() ? 'neon_postgres_isolated' : 'legacy_fallback',
         long_term_enabled: oxDbConfigured(),
-        compression_due: !!recorded?.compression_due,
+        compression_due: compressionDue,
+        compression_window_turns: 6,
         block_no: Number(recorded?.block_no || 0),
       },
       attachments: attachments.map(file => ({ name: file.name, type: file.mime, bytes: file.bytes, kind: file.kind })),
@@ -337,7 +501,16 @@ export async function oxAlphaRelay(req, res) {
       },
     });
   } catch (error) {
-    console.error('[openrouter-ox-alpha] failed', { trace_id, error: String(error?.message || error), stack: error?.stack || null });
-    return json(res, 502, { ok: false, trace_id, error: 'openrouter_request_failed', detail: String(error?.message || error) });
+    console.error('[openrouter-ox-alpha] failed', {
+      trace_id,
+      error: String(error?.message || error),
+      stack: error?.stack || null,
+    });
+    return json(res, 502, {
+      ok: false,
+      trace_id,
+      error: 'openrouter_request_failed',
+      detail: String(error?.message || error),
+    });
   }
 }
