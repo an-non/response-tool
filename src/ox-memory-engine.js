@@ -8,15 +8,21 @@ import {
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const MEMORY_MODEL = process.env.OX_MEMORY_MODEL || process.env.OX_ALPHA_MODEL || 'stealth/ox-alpha';
-const MEMORY_WINDOW_SIZE = 6;
-const V2_BLOCK_NAMESPACE = 1_000_000;
+const MEMORY_WINDOW_SIZE = 12;
+const V3_BLOCK_NAMESPACE = 2_000_000;
 const clean = (value, limit = 800) => String(value || '').slice(0, limit).trim();
 const array = value => Array.isArray(value) ? value : [];
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 const keyOf = value => clean(value, 240).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
 
 function apiKey() {
-  return String(process.env.Ox_API || process.env.OPENROUTER_API_KEY || process.env.OX_API || '').trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  return String(
+    process.env.OX_MEMORY_API_KEY ||
+    process.env.Ox_API ||
+    process.env.OPENROUTER_API_KEY ||
+    process.env.OX_API ||
+    '',
+  ).trim().replace(/^(["'])(.*)\1$/, '$2').trim();
 }
 
 function parseJson(text) {
@@ -50,7 +56,7 @@ function weighted(items, field, startTurn, endTurn) {
 
 function normalizeBlock(raw, blockNo, startTurn, endTurn) {
   return {
-    schema_version: 'ox-memory-1.2',
+    schema_version: 'ox-memory-1.3',
     block_no: blockNo,
     turn_range: [startTurn, endTurn],
     summary: clean(raw?.summary, 1400),
@@ -98,7 +104,7 @@ function mergeStrings(previous, next, limit = 50) {
 function mergeProfile(previousPayload, block, sessionId) {
   const previous = previousPayload || {};
   return {
-    schema_version: 'ox-profile-memory-1.2',
+    schema_version: 'ox-profile-memory-1.3',
     updated_from_session: sessionId,
     included_through_block: block.block_no,
     included_through_turn: Number(block.turn_range?.[1] || 0),
@@ -186,7 +192,7 @@ export function memoryCompressionDue(turnNo) {
 export async function compressDueBlock({ profileId, sessionId, turnNo }) {
   if (!memoryCompressionDue(turnNo)) return { due: false };
   const windowNo = Math.ceil(Number(turnNo) / MEMORY_WINDOW_SIZE);
-  const blockNo = V2_BLOCK_NAMESPACE + windowNo;
+  const blockNo = V3_BLOCK_NAMESPACE + windowNo;
   const existing = await getMemoryBlock(profileId, sessionId, blockNo);
   if (existing?.status === 'ready') return { due: false, already_ready: true, block_no: blockNo };
   const startTurn = (windowNo - 1) * MEMORY_WINDOW_SIZE + 1;
