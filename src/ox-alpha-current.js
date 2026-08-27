@@ -8,8 +8,6 @@ let activePlan = null;
 function resolvePlan() {
   if (activePlan) return activePlan;
   activePlan = oxModelPlan([]);
-  // ox-alpha-relay resolves OX_ALPHA_MODEL at module initialization time.
-  // Force our managed free primary before importing it, and ignore paid/legacy defaults.
   process.env.OX_ALPHA_MODEL = activePlan.primary;
   return activePlan;
 }
@@ -23,8 +21,19 @@ function requestHasRichInput(messages) {
   return false;
 }
 
-function retryableStatus(status) {
-  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+function isGenericRetryable400(status, detail) {
+  if (status !== 400) return false;
+  const text = String(detail || '').toLowerCase();
+  return text.includes('"msg":"bad request"') ||
+    text.includes('bad request') ||
+    text.includes('invalid_request_error');
+}
+
+function retryableStatus(status, detail) {
+  return isGenericRetryable400(status, detail) ||
+    status === 408 ||
+    status === 429 ||
+    (status >= 500 && status <= 599);
 }
 
 async function responseDetail(response) {
@@ -105,19 +114,18 @@ function installOpenRouterFreeRouting() {
         }
 
         const detail = await responseDetail(response);
+        const retry = retryableStatus(response.status, detail) && index < requestPlan.all_models.length - 1;
         console.warn('[ox-model-router] model rejected', {
           model,
           attempt: index + 1,
           max_attempts: requestPlan.all_models.length,
           status: response.status,
           elapsed_ms: elapsedMs,
-          retrying: retryableStatus(response.status) && index < requestPlan.all_models.length - 1,
+          retrying: retry,
           detail,
         });
 
-        if (!retryableStatus(response.status) || index >= requestPlan.all_models.length - 1) {
-          return response;
-        }
+        if (!retry) return response;
       } catch (error) {
         console.warn('[ox-model-router] model request failed', {
           model,
@@ -169,7 +177,8 @@ export async function oxAlphaHealth() {
       request_routing: {
         application_level_model_retries: true,
         max_attempts: plan.max_attempts,
-        retryable_http_statuses: [408, 429, '5xx'],
+        retryable_http_statuses: [400, 408, 429, '5xx'],
+        retryable_400_policy: 'generic upstream bad-request only',
         openrouter_models_array: false,
         provider_fallbacks_within_model: true,
         provider_sort: 'latency',
@@ -185,7 +194,7 @@ export async function oxAlphaHealth() {
       configured_model_managed_old_default: plan.configured_model_managed_old_default,
       reason: plan.configured_model_rejected
         ? 'A non-free configured model was ignored to prevent accidental paid inference.'
-        : 'Ox Alpha ended; Response Tool now uses explicit free models with application-level failover for upstream rate limits.',
+        : 'Ox Alpha ended; Response Tool now uses explicit free models with application-level failover for upstream errors and rate limits.',
     },
   };
 }
