@@ -1,31 +1,25 @@
-const LEGACY_OX_MODEL = 'stealth/ox-alpha';
-const GLM_FLASH_MODEL = 'z-ai/glm-5.3-flash';
+import { oxModelHealth, oxModelPlan } from './ox-model-router.js';
 
 let relayModulePromise = null;
-let modelResolution = null;
+let activePlan = null;
 
-function resolveModel() {
-  if (modelResolution) return modelResolution;
-  const configured = String(process.env.OX_ALPHA_MODEL || '').trim();
-  const migrated = !configured || configured === LEGACY_OX_MODEL;
-  const active = migrated ? GLM_FLASH_MODEL : configured;
-  process.env.OX_ALPHA_MODEL = active;
-  modelResolution = {
-    configured: configured || null,
-    active,
-    migrated_from: configured === LEGACY_OX_MODEL ? LEGACY_OX_MODEL : null,
-    migration_applied: migrated,
-  };
-  return modelResolution;
+function resolvePlan() {
+  if (activePlan) return activePlan;
+  activePlan = oxModelPlan([]);
+  // ox-alpha-relay resolves OX_ALPHA_MODEL at module initialization time.
+  // Force the scored free model before importing it, and ignore paid/legacy values.
+  process.env.OX_ALPHA_MODEL = activePlan.primary;
+  return activePlan;
 }
 
 async function relayModule() {
-  resolveModel();
+  resolvePlan();
   if (!relayModulePromise) relayModulePromise = import('./ox-alpha-relay.js');
   return relayModulePromise;
 }
 
 export async function oxAlphaRelay(req, res) {
+  resolvePlan();
   const relay = await relayModule();
   return relay.oxAlphaRelay(req, res);
 }
@@ -36,18 +30,23 @@ export async function oxAlphaHistory(req, res) {
 }
 
 export async function oxAlphaHealth() {
-  const resolution = resolveModel();
+  const plan = resolvePlan();
   const relay = await relayModule();
   const health = await relay.oxAlphaHealth();
   return {
     ...health,
-    model: resolution.active,
+    model: plan.primary,
+    pricing_policy: 'free_only',
+    model_router: oxModelHealth(),
     model_migration: {
-      legacy_model: LEGACY_OX_MODEL,
-      replacement_model: GLM_FLASH_MODEL,
-      configured_model: resolution.configured,
-      migration_applied: resolution.migration_applied,
-      reason: 'The Stealth Ox Alpha testing period ended; OpenRouter identified the model as Z.AI GLM-5.3 Flash.',
+      legacy_model: 'stealth/ox-alpha',
+      paid_successor_not_selected: 'z-ai/glm-5.3-flash',
+      replacement_model: plan.primary,
+      configured_model: plan.configured_model,
+      configured_model_rejected: plan.configured_model_rejected,
+      reason: plan.configured_model_rejected
+        ? 'A non-free configured model was ignored to prevent accidental paid inference.'
+        : 'Ox Alpha ended; Response Tool now uses the highest-scoring reviewed OpenRouter free model for smooth interactive chat.',
     },
   };
 }
