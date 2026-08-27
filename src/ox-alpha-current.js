@@ -2,6 +2,7 @@ import { oxModelHealth, oxModelPlan } from './ox-model-router.js';
 
 const OPENROUTER_CHAT_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const FETCH_ROUTER_MARK = Symbol.for('response-tool.ox-openrouter-free-router');
+const UNAVAILABLE_FREE_MODELS = Symbol.for('response-tool.ox-unavailable-free-models');
 let relayModulePromise = null;
 let activePlan = null;
 
@@ -21,16 +22,30 @@ function requestHasRichInput(messages) {
   return false;
 }
 
+function unavailableModels() {
+  if (!globalThis[UNAVAILABLE_FREE_MODELS]) globalThis[UNAVAILABLE_FREE_MODELS] = new Set();
+  return globalThis[UNAVAILABLE_FREE_MODELS];
+}
+
 function isGenericRetryable400(status, detail) {
   if (status !== 400) return false;
   const text = String(detail || '').toLowerCase();
-  return text.includes('"msg":"bad request"') ||
-    text.includes('bad request') ||
-    text.includes('invalid_request_error');
+  return text.includes('"msg":"bad request"') || text.includes('bad request') || text.includes('invalid_request_error');
+}
+
+function isUnavailableFree404(status, detail) {
+  if (status !== 404) return false;
+  const text = String(detail || '').toLowerCase();
+  return text.includes('unavailable for free') ||
+    text.includes('model not found') ||
+    text.includes('no endpoints found') ||
+    text.includes('no endpoint found') ||
+    text.includes('not available');
 }
 
 function retryableStatus(status, detail) {
   return isGenericRetryable400(status, detail) ||
+    isUnavailableFree404(status, detail) ||
     status === 408 ||
     status === 429 ||
     (status >= 500 && status <= 599);
@@ -68,23 +83,21 @@ function installOpenRouterFreeRouting() {
     if (!isChatPost) return nativeFetch(input, init);
 
     let payload;
-    try {
-      payload = JSON.parse(init.body);
-    } catch {
-      return nativeFetch(input, init);
-    }
+    try { payload = JSON.parse(init.body); }
+    catch { return nativeFetch(input, init); }
 
     const basePlan = resolvePlan();
-    if (payload?.model !== basePlan.primary || !Array.isArray(payload?.messages)) {
-      return nativeFetch(input, init);
-    }
+    if (payload?.model !== basePlan.primary || !Array.isArray(payload?.messages)) return nativeFetch(input, init);
 
     const rich = requestHasRichInput(payload.messages);
     const requestPlan = oxModelPlan(rich ? [{ kind: 'image' }] : []);
+    const blocked = unavailableModels();
+    const candidates = requestPlan.all_models.filter(model => !blocked.has(model));
+    const models = candidates.length ? candidates : requestPlan.all_models;
     let lastResponse = null;
 
-    for (let index = 0; index < requestPlan.all_models.length; index += 1) {
-      const model = requestPlan.all_models[index];
+    for (let index = 0; index < models.length; index += 1) {
+      const model = models[index];
       const attemptPayload = {
         ...payload,
         model,
@@ -95,6 +108,8 @@ function installOpenRouterFreeRouting() {
         },
       };
       delete attemptPayload.models;
+      // Cross-provider free models do not all accept OpenRouter's optional reasoning config.
+      delete attemptPayload.reasoning;
 
       const startedAt = Date.now();
       try {
@@ -106,7 +121,7 @@ function installOpenRouterFreeRouting() {
           console.info('[ox-model-router] model succeeded', {
             model,
             attempt: index + 1,
-            max_attempts: requestPlan.all_models.length,
+            max_attempts: models.length,
             elapsed_ms: elapsedMs,
             rich_input: rich,
           });
@@ -114,14 +129,16 @@ function installOpenRouterFreeRouting() {
         }
 
         const detail = await responseDetail(response);
-        const retry = retryableStatus(response.status, detail) && index < requestPlan.all_models.length - 1;
+        if (isUnavailableFree404(response.status, detail)) blocked.add(model);
+        const retry = retryableStatus(response.status, detail) && index < models.length - 1;
         console.warn('[ox-model-router] model rejected', {
           model,
           attempt: index + 1,
-          max_attempts: requestPlan.all_models.length,
+          max_attempts: models.length,
           status: response.status,
           elapsed_ms: elapsedMs,
           retrying: retry,
+          marked_unavailable: blocked.has(model),
           detail,
         });
 
@@ -130,11 +147,11 @@ function installOpenRouterFreeRouting() {
         console.warn('[ox-model-router] model request failed', {
           model,
           attempt: index + 1,
-          max_attempts: requestPlan.all_models.length,
-          retrying: index < requestPlan.all_models.length - 1,
+          max_attempts: models.length,
+          retrying: index < models.length - 1,
           error: String(error?.message || error),
         });
-        if (index >= requestPlan.all_models.length - 1) throw error;
+        if (index >= models.length - 1) throw error;
       }
     }
 
@@ -174,14 +191,17 @@ export async function oxAlphaHealth() {
     model_router: {
       ...oxModelHealth(),
       active: true,
+      runtime_unavailable_models: [...unavailableModels()],
       request_routing: {
         application_level_model_retries: true,
         max_attempts: plan.max_attempts,
-        retryable_http_statuses: [400, 408, 429, '5xx'],
+        retryable_http_statuses: [400, 404, 408, 429, '5xx'],
         retryable_400_policy: 'generic upstream bad-request only',
+        retryable_404_policy: 'expired or unavailable free endpoint only',
         openrouter_models_array: false,
         provider_fallbacks_within_model: true,
         provider_sort: 'latency',
+        optional_reasoning_parameter_removed: true,
         paid_model_guard: true,
       },
     },
@@ -194,7 +214,7 @@ export async function oxAlphaHealth() {
       configured_model_managed_old_default: plan.configured_model_managed_old_default,
       reason: plan.configured_model_rejected
         ? 'A non-free configured model was ignored to prevent accidental paid inference.'
-        : 'Ox Alpha ended; Response Tool now uses explicit free models with application-level failover for upstream errors and rate limits.',
+        : 'Ox Alpha ended; Response Tool now uses explicit free models with application-level failover for upstream errors, expired free endpoints, and rate limits.',
     },
   };
 }
