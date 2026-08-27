@@ -2,6 +2,7 @@ import { architectureRoute } from '../src/app.js';
 import { oxAlphaHealth, oxAlphaHistory, oxAlphaRelay } from '../src/ox-alpha-relay.js';
 import { artifactLimits, artifactTestResponse, decorateOxResponse } from '../src/ox-artifacts.js';
 import { oxSpeechHealth, oxSpeechRelay } from '../src/ox-speech.js';
+import { fishVoiceClone, fishVoiceHealth, fishVoiceStatus } from '../src/fish-voice.js';
 
 const json = (res, status, body) => {
   res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -39,6 +40,12 @@ export default async function handler(req, res) {
   if (req.method === 'POST' && mode === 'ox-speech') {
     return oxSpeechRelay(req, res);
   }
+  if (req.method === 'POST' && mode === 'fish-voice-clone') {
+    return fishVoiceClone(req, res);
+  }
+  if (req.method === 'GET' && mode === 'fish-voice-status') {
+    return fishVoiceStatus(req, res);
+  }
   if (req.method === 'GET' && mode === 'ox-alpha-health') {
     const health = await oxAlphaHealth();
     return json(res, 200, {
@@ -51,6 +58,7 @@ export default async function handler(req, res) {
         ...artifactLimits,
       },
       speech: oxSpeechHealth(),
+      voice_clone: fishVoiceHealth(),
     });
   }
   if (req.method === 'GET' && mode === 'ox-alpha-artifact-test') {
