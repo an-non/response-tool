@@ -9,7 +9,7 @@ function resolvePlan() {
   if (activePlan) return activePlan;
   activePlan = oxModelPlan([]);
   // ox-alpha-relay resolves OX_ALPHA_MODEL at module initialization time.
-  // Force the scored free model before importing it, and ignore paid/legacy values.
+  // Force our managed free primary before importing it, and ignore paid/legacy defaults.
   process.env.OX_ALPHA_MODEL = activePlan.primary;
   return activePlan;
 }
@@ -23,32 +23,114 @@ function requestHasRichInput(messages) {
   return false;
 }
 
+function retryableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function responseDetail(response) {
+  try {
+    const raw = await response.clone().text();
+    if (!raw) return null;
+    try {
+      const body = JSON.parse(raw);
+      return String(
+        body?.error?.metadata?.raw ||
+        body?.error?.message ||
+        body?.message ||
+        raw,
+      ).slice(0, 800);
+    } catch {
+      return raw.slice(0, 800);
+    }
+  } catch {
+    return null;
+  }
+}
+
 function installOpenRouterFreeRouting() {
   if (globalThis[FETCH_ROUTER_MARK]) return;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input?.url;
+    const isChatPost = url === OPENROUTER_CHAT_ENDPOINT &&
+      String(init?.method || 'GET').toUpperCase() === 'POST' &&
+      typeof init?.body === 'string';
+
+    if (!isChatPost) return nativeFetch(input, init);
+
+    let payload;
     try {
-      const url = typeof input === 'string' ? input : input?.url;
-      if (url === OPENROUTER_CHAT_ENDPOINT && String(init?.method || 'GET').toUpperCase() === 'POST' && typeof init?.body === 'string') {
-        const payload = JSON.parse(init.body);
-        const basePlan = resolvePlan();
-        if (payload?.model === basePlan.primary && Array.isArray(payload?.messages)) {
-          const rich = requestHasRichInput(payload.messages);
-          const requestPlan = oxModelPlan(rich ? [{ kind: 'image' }] : []);
-          delete payload.model;
-          payload.models = requestPlan.all_models;
-          payload.provider = {
-            ...(payload.provider || {}),
-            allow_fallbacks: true,
-            sort: { by: 'latency', partition: 'model' },
-          };
-          init = { ...init, body: JSON.stringify(payload) };
-        }
-      }
-    } catch (error) {
-      console.warn('[ox-model-router] request transform skipped', { error: String(error?.message || error) });
+      payload = JSON.parse(init.body);
+    } catch {
+      return nativeFetch(input, init);
     }
-    return nativeFetch(input, init);
+
+    const basePlan = resolvePlan();
+    if (payload?.model !== basePlan.primary || !Array.isArray(payload?.messages)) {
+      return nativeFetch(input, init);
+    }
+
+    const rich = requestHasRichInput(payload.messages);
+    const requestPlan = oxModelPlan(rich ? [{ kind: 'image' }] : []);
+    let lastResponse = null;
+
+    for (let index = 0; index < requestPlan.all_models.length; index += 1) {
+      const model = requestPlan.all_models[index];
+      const attemptPayload = {
+        ...payload,
+        model,
+        provider: {
+          ...(payload.provider || {}),
+          allow_fallbacks: true,
+          sort: 'latency',
+        },
+      };
+      delete attemptPayload.models;
+
+      const startedAt = Date.now();
+      try {
+        const response = await nativeFetch(input, { ...init, body: JSON.stringify(attemptPayload) });
+        lastResponse = response;
+        const elapsedMs = Date.now() - startedAt;
+
+        if (response.ok) {
+          console.info('[ox-model-router] model succeeded', {
+            model,
+            attempt: index + 1,
+            max_attempts: requestPlan.all_models.length,
+            elapsed_ms: elapsedMs,
+            rich_input: rich,
+          });
+          return response;
+        }
+
+        const detail = await responseDetail(response);
+        console.warn('[ox-model-router] model rejected', {
+          model,
+          attempt: index + 1,
+          max_attempts: requestPlan.all_models.length,
+          status: response.status,
+          elapsed_ms: elapsedMs,
+          retrying: retryableStatus(response.status) && index < requestPlan.all_models.length - 1,
+          detail,
+        });
+
+        if (!retryableStatus(response.status) || index >= requestPlan.all_models.length - 1) {
+          return response;
+        }
+      } catch (error) {
+        console.warn('[ox-model-router] model request failed', {
+          model,
+          attempt: index + 1,
+          max_attempts: requestPlan.all_models.length,
+          retrying: index < requestPlan.all_models.length - 1,
+          error: String(error?.message || error),
+        });
+        if (index >= requestPlan.all_models.length - 1) throw error;
+      }
+    }
+
+    return lastResponse || nativeFetch(input, init);
   };
   globalThis[FETCH_ROUTER_MARK] = true;
 }
@@ -85,8 +167,12 @@ export async function oxAlphaHealth() {
       ...oxModelHealth(),
       active: true,
       request_routing: {
-        model_fallbacks: true,
-        provider_sort: { by: 'latency', partition: 'model' },
+        application_level_model_retries: true,
+        max_attempts: plan.max_attempts,
+        retryable_http_statuses: [408, 429, '5xx'],
+        openrouter_models_array: false,
+        provider_fallbacks_within_model: true,
+        provider_sort: 'latency',
         paid_model_guard: true,
       },
     },
@@ -96,9 +182,10 @@ export async function oxAlphaHealth() {
       replacement_model: plan.primary,
       configured_model: plan.configured_model,
       configured_model_rejected: plan.configured_model_rejected,
+      configured_model_managed_old_default: plan.configured_model_managed_old_default,
       reason: plan.configured_model_rejected
         ? 'A non-free configured model was ignored to prevent accidental paid inference.'
-        : 'Ox Alpha ended; Response Tool now uses the highest-scoring reviewed OpenRouter free model for smooth interactive chat.',
+        : 'Ox Alpha ended; Response Tool now uses explicit free models with application-level failover for upstream rate limits.',
     },
   };
 }
