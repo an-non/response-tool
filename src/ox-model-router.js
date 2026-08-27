@@ -1,19 +1,21 @@
-const DOTS_MODEL = 'dots-studio/dots-3-note-preview:free';
-const DOTS_RETIRE_AT = Date.parse('2026-10-01T00:00:00Z');
 const GEMMA_31_MODEL = 'google/gemma-4-31b-it:free';
 const GEMMA_26_MODEL = 'google/gemma-4-26b-a4b-it:free';
 const LING_FLASH_MODEL = 'inclusionai/ling-3.0-flash:free';
+const GLM_52_MODEL = 'z-ai/glm-5.2:free';
 const NEMOTRON_OMNI_MODEL = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+const DOTS_MODEL = 'dots-studio/dots-3-note-preview:free';
+const DOTS_RETIRE_AT = Date.parse('2026-10-01T00:00:00Z');
 const OPENROUTER_MAX_ATTEMPTS = 3;
 
 const MANAGED_OLD_DEFAULTS = new Set([
   'stealth/ox-alpha',
   'z-ai/glm-5.3-flash',
   GEMMA_26_MODEL,
+  DOTS_MODEL,
 ]);
 
 function defaultPrimary() {
-  return Date.now() < DOTS_RETIRE_AT ? DOTS_MODEL : GEMMA_31_MODEL;
+  return GEMMA_31_MODEL;
 }
 
 function isExplicitFreeModel(model) {
@@ -41,12 +43,15 @@ export function oxModelPlan(attachments = []) {
   const hasRichAttachment = attachments.some(file => file?.kind === 'image' || file?.kind === 'pdf');
   const primary = configured.accepted || defaultPrimary();
 
-  const textFallbacks = Date.now() < DOTS_RETIRE_AT
-    ? [LING_FLASH_MODEL, GEMMA_31_MODEL]
-    : [LING_FLASH_MODEL, GEMMA_26_MODEL];
+  // Text route emphasizes stable conversational throughput and provider diversity.
+  const textFallbacks = [LING_FLASH_MODEL, GLM_52_MODEL];
+
+  // Rich route keeps image/PDF-capable models only. Dots is retained only as a last-resort
+  // temporary route while its free preview exists; it is not trusted as the primary after
+  // an observed AtlasCloud opaque HTTP 400 on 2026-08-27.
   const richFallbacks = Date.now() < DOTS_RETIRE_AT
-    ? [GEMMA_31_MODEL, NEMOTRON_OMNI_MODEL]
-    : [GEMMA_26_MODEL, NEMOTRON_OMNI_MODEL];
+    ? [NEMOTRON_OMNI_MODEL, DOTS_MODEL]
+    : [NEMOTRON_OMNI_MODEL, GEMMA_26_MODEL];
 
   const allModels = uniqueModels([
     primary,
@@ -90,17 +95,19 @@ export function oxModelHealth() {
     selection: {
       reviewed_at: '2026-08-27',
       primary_model: defaultPrimary(),
-      primary_reason: Date.now() < DOTS_RETIRE_AT
-        ? 'Dots3-Note Preview is currently free, multimodal, tool-capable, 512K-context, and showed 99.98% OpenRouter availability over the latest 24h review window.'
-        : 'Dots3-Note Preview reached its announced retirement date, so Gemma 4 31B Free became the default multimodal primary.',
+      primary_reason: 'Gemma 4 31B Free has two current free providers, low interactive latency, multimodal/tool support, and avoids relying on the unstable single-provider Dots preview as primary.',
+      incident_notes: [
+        'Gemma 4 26B Free was demoted after an observed Google AI Studio upstream 429 on 2026-08-27.',
+        'Dots3-Note Preview was demoted after an observed AtlasCloud opaque HTTP 400 on 2026-08-27 and public deployment-stability caveats.',
+      ],
       dots_retirement: '2026-09-30',
-      live_incident_response: 'Gemma 4 26B Free was demoted after an observed upstream 429 on 2026-08-27.',
     },
     fallback_policy: {
       text: textPlan.all_models,
       rich_attachment: richPlan.all_models,
       handled_by: 'Response Tool sequential OpenRouter requests; each model still keeps OpenRouter provider failover enabled',
-      retryable_http_statuses: [408, 429, '5xx'],
+      retryable_http_statuses: [400, 408, 429, '5xx'],
+      generic_400_only: true,
     },
   };
 }
