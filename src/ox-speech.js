@@ -1,0 +1,204 @@
+import crypto from 'node:crypto';
+import { fishDirectTts, fishVoiceHealth } from './fish-voice.js';
+
+const OPENROUTER_SPEECH_ENDPOINT = 'https://openrouter.ai/api/v1/audio/speech';
+const SPEECH_MODEL = process.env.OX_SPEECH_MODEL || 'fish-audio/s2.1-pro-free:free';
+const DEFAULT_VOICE = String(process.env.OX_SPEECH_VOICE || '').trim();
+const MAX_SPEECH_INPUT_BYTES = 32_000;
+const MAX_AUDIO_OUTPUT_BYTES = 3_000_000;
+const AUDIO_FORMATS = new Set(['mp3', 'pcm']);
+
+const json = (res, status, body) => {
+  res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(JSON.stringify(body));
+};
+
+const clean = (value, limit = 4000) => String(value ?? '').slice(0, limit);
+const traceId = () => `speech_${Date.now()}_${crypto.randomBytes(5).toString('hex')}`;
+
+function apiKeyInfo() {
+  const candidates = [
+    ['OX_SPEECH_API_KEY', process.env.OX_SPEECH_API_KEY],
+    ['Ox_API', process.env.Ox_API],
+    ['OPENROUTER_API_KEY', process.env.OPENROUTER_API_KEY],
+    ['OX_API', process.env.OX_API],
+  ];
+  const found = candidates.find(([, value]) => String(value || '').trim());
+  if (!found) return { key: '', source: null };
+  let key = String(found[1]).trim();
+  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) key = key.slice(1, -1).trim();
+  return { key, source: found[0] };
+}
+
+function mimeForFormat(format) {
+  if (format === 'pcm') return 'audio/L16';
+  return 'audio/mpeg';
+}
+
+function extensionForFormat(format) {
+  return format === 'pcm' ? 'pcm' : 'mp3';
+}
+
+function upstreamDetail(raw) {
+  try {
+    const body = JSON.parse(raw || '{}');
+    return clean(body?.error?.metadata?.raw || body?.error?.message || body?.message || raw, 1600).trim() || null;
+  } catch {
+    return clean(raw, 1600).trim() || null;
+  }
+}
+
+function artifactFromBuffer(buffer, { format, mime, source }) {
+  const ext = extensionForFormat(format);
+  return {
+    id: `art_audio_${crypto.randomBytes(8).toString('hex')}`,
+    filename: `fish-speech-${Date.now()}.${ext}`,
+    mime: mime || mimeForFormat(format),
+    encoding: 'base64',
+    bytes: buffer.byteLength,
+    data_base64: buffer.toString('base64'),
+    source,
+    persistent: false,
+  };
+}
+
+export function oxSpeechHealth() {
+  const { key, source } = apiKeyInfo();
+  return {
+    enabled: true,
+    provider: 'openrouter',
+    model: SPEECH_MODEL,
+    api_key_configured: !!key,
+    api_key_source: source,
+    voice_configured: !!DEFAULT_VOICE,
+    voice_source: DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default',
+    endpoint: '/api/architecture?mode=ox-speech',
+    input_modalities: ['text'],
+    output_modalities: ['speech'],
+    formats: [...AUDIO_FORMATS],
+    default_format: 'mp3',
+    max_input_bytes: MAX_SPEECH_INPUT_BYTES,
+    max_audio_output_bytes: MAX_AUDIO_OUTPUT_BYTES,
+    cloned_voice_route: {
+      enabled: true,
+      provider: 'fish_audio_direct',
+      reference_id_field: 'reference_id',
+      health: fishVoiceHealth(),
+    },
+  };
+}
+
+export async function oxSpeechRelay(req, res) {
+  if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method_not_allowed' });
+  const trace_id = traceId();
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const input = String(body.input ?? body.text ?? '').trim();
+  if (!input) return json(res, 400, { ok: false, trace_id, error: 'speech_input_required' });
+  const inputBytes = Buffer.byteLength(input, 'utf8');
+  if (inputBytes > MAX_SPEECH_INPUT_BYTES) return json(res, 413, { ok: false, trace_id, error: 'speech_input_too_large', input_bytes: inputBytes, max_input_bytes: MAX_SPEECH_INPUT_BYTES });
+
+  const format = AUDIO_FORMATS.has(String(body.response_format || '').toLowerCase()) ? String(body.response_format).toLowerCase() : 'mp3';
+  const referenceId = clean(body.reference_id || '', 160).trim();
+
+  if (referenceId) {
+    let generated;
+    try {
+      generated = await fishDirectTts({ text: input, referenceId, format });
+    } catch (error) {
+      const status = Number(error?.status || error?.httpStatus || 0);
+      return json(res, status === 401 ? 401 : status === 429 ? 429 : status === 402 ? 402 : 502, {
+        ok: false,
+        trace_id,
+        error: error?.code || (status === 429 ? 'fish_speech_rate_limit' : 'fish_cloned_speech_external_error'),
+        http_status: status || null,
+        detail: clean(error?.message || error, 1600),
+        provider: 'fish_audio_direct',
+        reference_id: referenceId,
+      });
+    }
+    const buffer = generated.buffer;
+    if (!buffer.length) return json(res, 502, { ok: false, trace_id, error: 'speech_empty_response', provider: 'fish_audio_direct' });
+    if (buffer.byteLength > MAX_AUDIO_OUTPUT_BYTES) return json(res, 502, { ok: false, trace_id, error: 'speech_output_too_large_for_inline_handoff', bytes: buffer.byteLength, max_bytes: MAX_AUDIO_OUTPUT_BYTES });
+    return json(res, 200, {
+      ok: true,
+      service: 'response-tool-speech',
+      trace_id,
+      result_type: 'generated_speech',
+      text: 'Fish Audioのクローン音声で応答を生成しました。',
+      provider: 'fish_audio_direct',
+      model: generated.model,
+      generation: {
+        input_bytes: inputBytes,
+        audio_bytes: buffer.byteLength,
+        response_format: format,
+        elapsed_ms: generated.elapsed_ms,
+        reference_id: referenceId,
+      },
+      artifacts: [artifactFromBuffer(buffer, { format, mime: generated.contentType, source: 'fish-audio-cloned-voice' })],
+      artifact_handoff: { enabled: true, mode: 'inline_base64', persistent: false, kind: 'audio' },
+    });
+  }
+
+  const { key, source } = apiKeyInfo();
+  if (!key) return json(res, 503, { ok: false, trace_id, error: 'openrouter_api_key_missing' });
+  const suppliedVoice = clean(body.voice || '', 220).trim();
+  const voice = suppliedVoice || DEFAULT_VOICE;
+  const requestBody = { model: SPEECH_MODEL, input, response_format: format };
+  if (voice) requestBody.voice = voice;
+
+  const headers = {
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    'X-Title': 'Response Tool / Fish Audio S2.1 Pro Free',
+  };
+  if (process.env.VERCEL_URL) headers['HTTP-Referer'] = `https://${process.env.VERCEL_URL}`;
+
+  const startedAt = Date.now();
+  let upstream;
+  try {
+    upstream = await fetch(OPENROUTER_SPEECH_ENDPOINT, { method: 'POST', headers, body: JSON.stringify(requestBody) });
+  } catch (error) {
+    return json(res, 502, { ok: false, trace_id, error: 'speech_request_failed', detail: clean(error?.message || error, 800) });
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  if (!upstream.ok) {
+    const raw = await upstream.text().catch(() => '');
+    const retryAfterRaw = upstream.headers.get('retry-after');
+    const retryAfter = retryAfterRaw && Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : null;
+    const detail = upstreamDetail(raw);
+    console.error('[openrouter-fish-speech] rejected', { trace_id, status: upstream.status, model: SPEECH_MODEL, elapsed_ms: elapsedMs, detail, voice_supplied: !!voice });
+    return json(res, upstream.status === 429 ? 429 : 502, {
+      ok: false,
+      trace_id,
+      error: upstream.status === 429 ? 'speech_rate_limit' : 'speech_external_error',
+      http_status: upstream.status,
+      detail,
+      retry_after_seconds: retryAfter,
+      model: SPEECH_MODEL,
+      voice_supplied: !!voice,
+      voice_source: suppliedVoice ? 'request' : DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default',
+    });
+  }
+
+  const buffer = Buffer.from(await upstream.arrayBuffer());
+  if (!buffer.length) return json(res, 502, { ok: false, trace_id, error: 'speech_empty_response', model: SPEECH_MODEL });
+  if (buffer.byteLength > MAX_AUDIO_OUTPUT_BYTES) return json(res, 502, { ok: false, trace_id, error: 'speech_output_too_large_for_inline_handoff', bytes: buffer.byteLength, max_bytes: MAX_AUDIO_OUTPUT_BYTES });
+
+  const voiceSource = suppliedVoice ? 'request' : DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default';
+  return json(res, 200, {
+    ok: true,
+    service: 'response-tool-speech',
+    trace_id,
+    result_type: 'generated_speech',
+    text: 'Fish Audio S2.1 Pro Freeで音声を生成しました。',
+    provider: 'openrouter',
+    model: SPEECH_MODEL,
+    api_key_source: source,
+    generation: { input_bytes: inputBytes, audio_bytes: buffer.byteLength, response_format: format, elapsed_ms: elapsedMs, voice_supplied: !!voice, voice_source: voiceSource },
+    artifacts: [artifactFromBuffer(buffer, { format, mime: upstream.headers.get('content-type')?.split(';')[0], source: 'openrouter-fish-audio' })],
+    artifact_handoff: { enabled: true, mode: 'inline_base64', persistent: false, kind: 'audio' },
+  });
+}
