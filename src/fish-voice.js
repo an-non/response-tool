@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 const FISH_API_BASE = 'https://api.fish.audio';
-const FISH_TTS_MODEL = process.env.FISH_AUDIO_MODEL || 's2.1-pro-free';
+const FISH_TTS_MODEL = process.env.FISH_AUDIO_MODEL || 's2-pro';
 const MAX_VOICE_FILES = 3;
 const MAX_VOICE_FILE_BYTES = 2_500_000;
 const MAX_VOICE_TOTAL_BYTES = 3_000_000;
