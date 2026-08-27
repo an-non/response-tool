@@ -1,7 +1,11 @@
 import crypto from 'node:crypto';
 
 const FISH_API_BASE = 'https://api.fish.audio';
-const FISH_TTS_MODEL = process.env.FISH_AUDIO_MODEL || 's2-pro';
+const DEFAULT_FREE_FISH_TTS_MODEL = 's2.1-pro-free';
+const configuredFishModel = String(process.env.FISH_AUDIO_MODEL || '').trim();
+const FISH_TTS_MODEL = configuredFishModel && configuredFishModel.includes('free')
+  ? configuredFishModel
+  : DEFAULT_FREE_FISH_TTS_MODEL;
 const MAX_VOICE_FILES = 3;
 const MAX_VOICE_FILE_BYTES = 2_500_000;
 const MAX_VOICE_TOTAL_BYTES = 3_000_000;
@@ -66,6 +70,10 @@ function upstreamDetail(raw, body) {
   return clean(body?.detail || body?.message || body?.error?.message || body?.error || raw, 1800).trim() || null;
 }
 
+function isCreditError(detail) {
+  return /insufficient api credit|api credit|add funds|credit balance/i.test(String(detail || ''));
+}
+
 export function fishVoiceHealth() {
   const { key, source } = fishApiKeyInfo();
   return {
@@ -75,6 +83,9 @@ export function fishVoiceHealth() {
     expected_env: 'fushman_API',
     provider: 'fish_audio_direct',
     model: FISH_TTS_MODEL,
+    pricing_policy: 'free_model_only',
+    configured_model: configuredFishModel || null,
+    configured_model_rejected: !!configuredFishModel && configuredFishModel !== FISH_TTS_MODEL,
     clone_endpoint: '/api/architecture?mode=fish-voice-clone',
     status_endpoint: '/api/architecture?mode=fish-voice-status',
     max_voice_files: MAX_VOICE_FILES,
@@ -225,9 +236,12 @@ export async function fishDirectTts({ text, referenceId = '', format = 'mp3' }) 
   const elapsed_ms = Date.now() - startedAt;
   if (!response.ok) {
     const { raw, body: errorBody } = await readJsonSafe(response);
-    const error = new Error(upstreamDetail(raw, errorBody) || `fish_tts_http_${response.status}`);
+    const detail = upstreamDetail(raw, errorBody) || `fish_tts_http_${response.status}`;
+    const error = new Error(detail);
     error.status = response.status;
     error.httpStatus = response.status;
+    error.code = isCreditError(detail) ? 'fish_audio_credit_insufficient' : 'fish_audio_tts_failed';
+    error.model = FISH_TTS_MODEL;
     throw error;
   }
   const buffer = Buffer.from(await response.arrayBuffer());
