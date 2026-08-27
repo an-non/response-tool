@@ -1,5 +1,5 @@
 import { architectureRoute } from '../src/app.js';
-import { oxAlphaHealth, oxAlphaHistory, oxAlphaRelay } from '../src/ox-alpha-relay.js';
+import { oxAlphaHealth, oxAlphaHistory, oxAlphaRelay } from '../src/ox-alpha-current.js';
 import { artifactLimits, artifactTestResponse, decorateOxResponse } from '../src/ox-artifacts.js';
 import { oxSpeechHealth, oxSpeechRelay } from '../src/ox-speech.js';
 import { fishVoiceClone, fishVoiceHealth, fishVoiceStatus } from '../src/fish-voice.js';
