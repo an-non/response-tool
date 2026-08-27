@@ -18,6 +18,7 @@ const json = (res, status, body) => {
 
 export function fishApiKeyInfo() {
   const candidates = [
+    ['fushman_API', process.env.fushman_API],
     ['FISH_AUDIO_API_KEY', process.env.FISH_AUDIO_API_KEY],
     ['FISH_API_KEY', process.env.FISH_API_KEY],
   ];
@@ -71,6 +72,7 @@ export function fishVoiceHealth() {
     enabled: true,
     api_key_configured: !!key,
     api_key_source: source,
+    expected_env: 'fushman_API',
     provider: 'fish_audio_direct',
     model: FISH_TTS_MODEL,
     clone_endpoint: '/api/architecture?mode=fish-voice-clone',
@@ -92,7 +94,7 @@ export async function fishVoiceClone(req, res) {
   if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method_not_allowed' });
   const trace_id = traceId('voice_clone');
   const { key, source } = fishApiKeyInfo();
-  if (!key) return json(res, 503, { ok: false, trace_id, error: 'fish_audio_api_key_missing', expected_env: 'FISH_AUDIO_API_KEY' });
+  if (!key) return json(res, 503, { ok: false, trace_id, error: 'fish_audio_api_key_missing', expected_env: 'fushman_API' });
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const title = clean(body.title || '', 80).trim();
@@ -156,7 +158,7 @@ export async function fishVoiceClone(req, res) {
     train_mode: upstreamBody.train_mode || 'fast',
     created_at: upstreamBody.created_at || null,
   };
-  console.info('[fish-voice-clone] created', { trace_id, voice_id: voice.id, state: voice.state, elapsed_ms, sample_count: normalized.samples.length, sample_bytes: normalized.totalBytes });
+  console.info('[fish-voice-clone] created', { trace_id, voice_id: voice.id, state: voice.state, elapsed_ms, sample_count: normalized.samples.length, sample_bytes: normalized.totalBytes, api_key_source: source });
   return json(res, 201, {
     ok: true,
     service: 'response-tool-fish-voice-clone',
@@ -172,7 +174,7 @@ export async function fishVoiceStatus(req, res) {
   if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'method_not_allowed' });
   const trace_id = traceId('voice_status');
   const { key } = fishApiKeyInfo();
-  if (!key) return json(res, 503, { ok: false, trace_id, error: 'fish_audio_api_key_missing', expected_env: 'FISH_AUDIO_API_KEY' });
+  if (!key) return json(res, 503, { ok: false, trace_id, error: 'fish_audio_api_key_missing', expected_env: 'fushman_API' });
   const voiceId = clean(req.query?.id || '', 120).trim();
   if (!voiceId) return json(res, 400, { ok: false, trace_id, error: 'voice_id_required' });
 
