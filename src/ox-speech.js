@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 
 const OPENROUTER_SPEECH_ENDPOINT = 'https://openrouter.ai/api/v1/audio/speech';
 const SPEECH_MODEL = process.env.OX_SPEECH_MODEL || 'fish-audio/s2.1-pro-free:free';
+const DEFAULT_VOICE = String(process.env.OX_SPEECH_VOICE || '').trim();
 const MAX_SPEECH_INPUT_BYTES = 32_000;
 const MAX_REFERENCE_AUDIO_BYTES = 2_097_152;
 const MAX_AUDIO_OUTPUT_BYTES = 3_000_000;
@@ -75,6 +76,8 @@ export function oxSpeechHealth() {
     model: SPEECH_MODEL,
     api_key_configured: !!key,
     api_key_source: source,
+    voice_configured: !!DEFAULT_VOICE,
+    voice_source: DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default',
     endpoint: '/api/architecture?mode=ox-speech',
     input_modalities: ['text'],
     output_modalities: ['speech'],
@@ -87,7 +90,7 @@ export function oxSpeechHealth() {
       enabled: true,
       persistent: false,
       forwarded_to_openrouter: false,
-      reason: 'OpenRouter currently advertises this Fish Audio model as text-to-speech only; raw reference audio is retained request-scoped for a future voice-clone adapter.',
+      reason: 'Raw reference audio is accepted by Response Tool but is not forwarded through the OpenRouter speech endpoint. Use a Fish Audio voice/reference ID when available.',
     },
   };
 }
@@ -105,7 +108,8 @@ export async function oxSpeechRelay(req, res) {
   if (inputBytes > MAX_SPEECH_INPUT_BYTES) return json(res, 413, { ok: false, trace_id, error: 'speech_input_too_large', input_bytes: inputBytes, max_input_bytes: MAX_SPEECH_INPUT_BYTES });
 
   const format = AUDIO_FORMATS.has(String(body.response_format || '').toLowerCase()) ? String(body.response_format).toLowerCase() : 'mp3';
-  const voice = clean(body.voice || '', 220).trim();
+  const suppliedVoice = clean(body.voice || '', 220).trim();
+  const voice = suppliedVoice || DEFAULT_VOICE;
   let referenceAudio = null;
   try { referenceAudio = normalizeReferenceAudio(body.reference_audio); }
   catch (error) { return json(res, 413, { ok: false, trace_id, error: String(error?.message || error) }); }
@@ -133,15 +137,18 @@ export async function oxSpeechRelay(req, res) {
     const raw = await upstream.text().catch(() => '');
     const retryAfterRaw = upstream.headers.get('retry-after');
     const retryAfter = retryAfterRaw && Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : null;
-    console.error('[openrouter-fish-speech] rejected', { trace_id, status: upstream.status, model: SPEECH_MODEL, elapsed_ms: elapsedMs, detail: upstreamDetail(raw) });
+    const detail = upstreamDetail(raw);
+    console.error('[openrouter-fish-speech] rejected', { trace_id, status: upstream.status, model: SPEECH_MODEL, elapsed_ms: elapsedMs, detail, voice_supplied: !!voice });
     return json(res, upstream.status === 429 ? 429 : 502, {
       ok: false,
       trace_id,
       error: upstream.status === 429 ? 'speech_rate_limit' : 'speech_external_error',
       http_status: upstream.status,
-      detail: upstreamDetail(raw),
+      detail,
       retry_after_seconds: retryAfter,
       model: SPEECH_MODEL,
+      voice_supplied: !!voice,
+      voice_source: suppliedVoice ? 'request' : DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default',
       reference_audio: referenceAudio ? { ...referenceAudio, received: true, forwarded_to_openrouter: false } : null,
     });
   }
@@ -164,7 +171,8 @@ export async function oxSpeechRelay(req, res) {
     persistent: false,
   };
 
-  console.info('[openrouter-fish-speech] generated', { trace_id, model: SPEECH_MODEL, bytes: buffer.byteLength, format, elapsed_ms: elapsedMs, reference_audio_received: !!referenceAudio, voice_supplied: !!voice });
+  const voiceSource = suppliedVoice ? 'request' : DEFAULT_VOICE ? 'OX_SPEECH_VOICE' : 'provider_default';
+  console.info('[openrouter-fish-speech] generated', { trace_id, model: SPEECH_MODEL, bytes: buffer.byteLength, format, elapsed_ms: elapsedMs, reference_audio_received: !!referenceAudio, voice_supplied: !!voice, voice_source: voiceSource });
   return json(res, 200, {
     ok: true,
     service: 'response-tool-speech',
@@ -174,7 +182,7 @@ export async function oxSpeechRelay(req, res) {
     provider: 'openrouter',
     model: SPEECH_MODEL,
     api_key_source: source,
-    generation: { input_bytes: inputBytes, audio_bytes: buffer.byteLength, response_format: format, elapsed_ms: elapsedMs, voice_supplied: !!voice },
+    generation: { input_bytes: inputBytes, audio_bytes: buffer.byteLength, response_format: format, elapsed_ms: elapsedMs, voice_supplied: !!voice, voice_source: voiceSource },
     reference_audio: referenceAudio ? { ...referenceAudio, received: true, persistent: false, forwarded_to_openrouter: false } : null,
     artifacts: [artifact],
     artifact_handoff: { enabled: true, mode: 'inline_base64', persistent: false, kind: 'audio' },
