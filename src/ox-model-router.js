@@ -1,10 +1,12 @@
 const PRIMARY_MODEL = 'google/gemma-4-26b-a4b-it:free';
-const FAST_TEXT_FALLBACK = 'openai/gpt-oss-20b:free';
-const CAPABILITY_FALLBACK = 'openrouter/free';
+const RICH_FALLBACK_MODEL = 'google/gemma-4-31b-it:free';
+const RICH_SECOND_FALLBACK_MODEL = 'google/gemma-3-27b-it:free';
+const TEXT_FALLBACK_MODEL = 'inclusionai/ling-3.0-flash:free';
+const TEXT_SECOND_FALLBACK_MODEL = 'openai/gpt-oss-20b:free';
 
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 
-// Snapshot of OpenRouter's public performance pages reviewed on 2026-08-27.
+// Snapshot of OpenRouter's public model/performance pages reviewed on 2026-08-27.
 // The score is intentionally biased toward a smooth interactive chat experience:
 // quality 30%, responsiveness 25%, reliability 20%, current app compatibility 15%, context 10%.
 const CANDIDATES = [
@@ -22,7 +24,33 @@ const CANDIDATES = [
     role: 'primary',
   },
   {
-    id: FAST_TEXT_FALLBACK,
+    id: RICH_FALLBACK_MODEL,
+    label: 'Gemma 4 31B (free)',
+    intelligence_index: 27.4,
+    latency_seconds: 1.55,
+    throughput_tps: 29,
+    uptime_percent: 99.0,
+    context_tokens: 262_144,
+    multimodal: true,
+    tools: true,
+    structured_output: true,
+    role: 'rich_fallback',
+  },
+  {
+    id: TEXT_FALLBACK_MODEL,
+    label: 'Ling 3.0 Flash (free)',
+    intelligence_index: 26.0,
+    latency_seconds: 1.35,
+    throughput_tps: 35,
+    uptime_percent: 98.5,
+    context_tokens: 262_144,
+    multimodal: false,
+    tools: true,
+    structured_output: false,
+    role: 'text_fallback',
+  },
+  {
+    id: TEXT_SECOND_FALLBACK_MODEL,
     label: 'gpt-oss-20b (free)',
     intelligence_index: 24.5,
     latency_seconds: 0.55,
@@ -33,6 +61,19 @@ const CANDIDATES = [
     tools: true,
     structured_output: true,
     role: 'fast_text_fallback',
+  },
+  {
+    id: RICH_SECOND_FALLBACK_MODEL,
+    label: 'Gemma 3 27B (free)',
+    intelligence_index: 23.0,
+    latency_seconds: 1.7,
+    throughput_tps: 26,
+    uptime_percent: 98.0,
+    context_tokens: 131_072,
+    multimodal: true,
+    tools: true,
+    structured_output: true,
+    role: 'rich_second_fallback',
   },
 ];
 
@@ -58,15 +99,16 @@ export const OX_MODEL_CANDIDATES = CANDIDATES.map(candidate => ({
   smooth_chat_score: candidateScore(candidate),
 })).sort((a, b) => b.smooth_chat_score - a.smooth_chat_score);
 
-function isFreeModel(model) {
-  const value = String(model || '').trim();
-  return value === CAPABILITY_FALLBACK || value.endsWith(':free');
+function isExplicitFreeModel(model) {
+  return String(model || '').trim().endsWith(':free');
 }
 
 function configuredFreeModel() {
   const configured = String(process.env.OX_ALPHA_MODEL || '').trim();
   if (!configured) return { configured: null, accepted: null, rejected: false };
-  if (isFreeModel(configured)) return { configured, accepted: configured, rejected: false };
+  if (isExplicitFreeModel(configured) && configured !== 'openrouter/free') {
+    return { configured, accepted: configured, rejected: false };
+  }
   return { configured, accepted: null, rejected: true };
 }
 
@@ -75,19 +117,21 @@ export function oxModelPlan(attachments = []) {
   const hasRichAttachment = attachments.some(file => file?.kind === 'image' || file?.kind === 'pdf');
   const primary = configured.accepted || PRIMARY_MODEL;
   const fallbackPool = hasRichAttachment
-    ? [CAPABILITY_FALLBACK]
-    : [FAST_TEXT_FALLBACK, CAPABILITY_FALLBACK];
+    ? [RICH_FALLBACK_MODEL, RICH_SECOND_FALLBACK_MODEL]
+    : [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL, TEXT_SECOND_FALLBACK_MODEL];
   const fallbacks = fallbackPool.filter(model => model !== primary);
   return {
     primary,
     fallbacks,
     all_models: [primary, ...fallbacks],
     free_only: true,
+    explicit_models_only: true,
+    random_free_router_disabled: true,
     has_rich_attachment: hasRichAttachment,
     configured_model: configured.configured,
     configured_model_rejected: configured.rejected,
     configured_model_rejection_reason: configured.rejected
-      ? 'Non-free OX_ALPHA_MODEL ignored to prevent accidental paid inference.'
+      ? 'Only explicit :free conversational models are accepted. Paid models and openrouter/free are ignored.'
       : null,
   };
 }
@@ -95,21 +139,23 @@ export function oxModelPlan(attachments = []) {
 export function oxModelHealth() {
   const plan = oxModelPlan([]);
   return {
-    policy: 'openrouter_free_only',
+    policy: 'openrouter_explicit_free_chat_models_only',
     primary: plan.primary,
     fallbacks: plan.fallbacks,
     configured_model: plan.configured_model,
     configured_model_rejected: plan.configured_model_rejected,
+    random_free_router_disabled: true,
+    excluded_model_classes: ['safety classifiers', 'rerankers', 'embedders', 'openrouter/free random router'],
     scoring: {
       reviewed_at: '2026-08-27',
       formula: 'quality 30% + responsiveness 25% + reliability 20% + app compatibility 15% + context 10%',
       candidates: OX_MODEL_CANDIDATES,
-      selected_reason: 'Gemma 4 Free scored highest while preserving Response Tool image/PDF/tool compatibility and low interactive latency.',
+      selected_reason: 'Gemma 4 Free remains the primary because it preserves Response Tool multimodal/tool compatibility with low interactive latency.',
     },
     fallback_policy: {
-      text: [FAST_TEXT_FALLBACK, CAPABILITY_FALLBACK],
-      rich_attachment: [CAPABILITY_FALLBACK],
-      handled_by: 'OpenRouter models fallback routing',
+      text: [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL, TEXT_SECOND_FALLBACK_MODEL],
+      rich_attachment: [RICH_FALLBACK_MODEL, RICH_SECOND_FALLBACK_MODEL],
+      handled_by: 'OpenRouter models fallback routing with an explicit allowlist',
     },
   };
 }
