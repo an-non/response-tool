@@ -3,6 +3,7 @@ const RICH_FALLBACK_MODEL = 'google/gemma-4-31b-it:free';
 const RICH_SECOND_FALLBACK_MODEL = 'google/gemma-3-27b-it:free';
 const TEXT_FALLBACK_MODEL = 'inclusionai/ling-3.0-flash:free';
 const TEXT_SECOND_FALLBACK_MODEL = 'openai/gpt-oss-20b:free';
+const OPENROUTER_MAX_MODELS = 3;
 
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 
@@ -60,7 +61,7 @@ const CANDIDATES = [
     multimodal: false,
     tools: true,
     structured_output: true,
-    role: 'fast_text_fallback',
+    role: 'standby_not_routed',
   },
   {
     id: RICH_SECOND_FALLBACK_MODEL,
@@ -118,12 +119,14 @@ export function oxModelPlan(attachments = []) {
   const primary = configured.accepted || PRIMARY_MODEL;
   const fallbackPool = hasRichAttachment
     ? [RICH_FALLBACK_MODEL, RICH_SECOND_FALLBACK_MODEL]
-    : [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL, TEXT_SECOND_FALLBACK_MODEL];
-  const fallbacks = fallbackPool.filter(model => model !== primary);
+    : [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL];
+  const fallbacks = fallbackPool.filter(model => model !== primary).slice(0, OPENROUTER_MAX_MODELS - 1);
+  const allModels = [primary, ...fallbacks].slice(0, OPENROUTER_MAX_MODELS);
   return {
-    primary,
-    fallbacks,
-    all_models: [primary, ...fallbacks],
+    primary: allModels[0],
+    fallbacks: allModels.slice(1),
+    all_models: allModels,
+    max_models: OPENROUTER_MAX_MODELS,
     free_only: true,
     explicit_models_only: true,
     random_free_router_disabled: true,
@@ -142,6 +145,7 @@ export function oxModelHealth() {
     policy: 'openrouter_explicit_free_chat_models_only',
     primary: plan.primary,
     fallbacks: plan.fallbacks,
+    max_models_per_request: OPENROUTER_MAX_MODELS,
     configured_model: plan.configured_model,
     configured_model_rejected: plan.configured_model_rejected,
     random_free_router_disabled: true,
@@ -153,9 +157,10 @@ export function oxModelHealth() {
       selected_reason: 'Gemma 4 Free remains the primary because it preserves Response Tool multimodal/tool compatibility with low interactive latency.',
     },
     fallback_policy: {
-      text: [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL, TEXT_SECOND_FALLBACK_MODEL],
+      text: [TEXT_FALLBACK_MODEL, RICH_FALLBACK_MODEL],
       rich_attachment: [RICH_FALLBACK_MODEL, RICH_SECOND_FALLBACK_MODEL],
-      handled_by: 'OpenRouter models fallback routing with an explicit allowlist',
+      standby_not_routed: [TEXT_SECOND_FALLBACK_MODEL],
+      handled_by: 'OpenRouter models fallback routing with an explicit allowlist capped at three total models',
     },
   };
 }
